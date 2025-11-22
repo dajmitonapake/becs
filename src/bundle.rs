@@ -1,6 +1,6 @@
 use std::any::TypeId;
 
-use crate::{Archetype, TypeInfo, World};
+use crate::{archetype::Archetype, blob_data::TypeInfo, world::World};
 
 pub trait Bundle {
     fn register(world: &mut World);
@@ -27,10 +27,8 @@ impl<T0: 'static> Bundle for (T0,) {
             ),
         );
 
-        archetype.insert(TypeId::of::<T0>(), &mut self.0 as *mut T0 as *mut u8);
-
+        archetype.insert(TypeId::of::<T0>(), (&mut self.0 as *mut T0).cast::<u8>());
         archetype.insert_row(row);
-
         std::mem::forget(self);
     }
 }
@@ -63,7 +61,7 @@ macro_rules! impl_bundle_for_tuple {
                 )*
 
                 $(
-                    archetype.insert(TypeId::of::<$T>(), &mut self.$N as *mut $T as *mut u8);
+                    archetype.insert(TypeId::of::<$T>(), (&mut self.$N as *mut $T).cast::<u8>());
                 )*
 
                 archetype.insert_row(row);

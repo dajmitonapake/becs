@@ -1,153 +1,204 @@
 use std::any::TypeId;
 
-use crate::{BlobData, World};
+use crate::{archetype::Archetype, blob_data::BlobData, world::World};
 
 pub trait Fetch {
     type Item<'a>;
+    type Chunk<'a>: Iterator<Item = Self::Item<'a>>;
 
-    fn fetch<'a>(index: usize, column: &'a BlobData) -> Self::Item<'a>;
     fn bit(world: &World) -> u64;
     fn type_id() -> TypeId;
+    fn take_chunk<'a>(column: &'a BlobData) -> Self::Chunk<'a>;
+    fn release<'a>(column: &'a BlobData);
 }
 
 impl<T: 'static> Fetch for &T {
     type Item<'a> = &'a T;
+    type Chunk<'a> = std::slice::Iter<'a, T>;
 
-    fn fetch<'a>(index: usize, column: &'a BlobData) -> Self::Item<'a> {
-        column.get(index).unwrap()
-    }
-
+    #[inline]
     fn bit(world: &World) -> u64 {
         world.bit_of::<T>().unwrap()
     }
 
+    #[inline]
     fn type_id() -> TypeId {
         TypeId::of::<T>()
     }
-}
 
+    #[inline]
+    fn take_chunk<'a>(column: &'a BlobData) -> Self::Chunk<'a> {
+        if !column.borrow() {
+            panic!("Conflicting queries: Could not immutably borrow query");
+        }
+        unsafe { column.as_slice().iter() }
+    }
+
+    #[inline]
+    fn release<'a>(column: &'a BlobData) {
+        column.release()
+    }
+}
 impl<T: 'static> Fetch for &mut T {
     type Item<'a> = &'a mut T;
+    type Chunk<'a> = std::slice::IterMut<'a, T>;
 
-    fn fetch<'a>(index: usize, column: &'a BlobData) -> Self::Item<'a> {
-        column.get_mut(index).unwrap()
-    }
-
+    #[inline]
     fn bit(world: &World) -> u64 {
         world.bit_of::<T>().unwrap()
     }
 
+    #[inline]
     fn type_id() -> TypeId {
         TypeId::of::<T>()
     }
-}
 
-pub trait QueryItems {
-    type Items<'a>;
+    #[inline]
+    fn take_chunk<'a>(column: &'a BlobData) -> Self::Chunk<'a> {
+        if !column.borrow_mut() {
+            panic!("Conflicting queries: Could not mutably borrow query");
+        }
 
-    fn query_items<'a>(world: &'a mut World) -> impl Iterator<Item = Self::Items<'a>>;
-}
+        unsafe { column.as_slice_mut().iter_mut() }
+    }
 
-impl<T0: Fetch + 'static> QueryItems for (T0,) {
-    type Items<'a> = T0::Item<'a>;
-
-    fn query_items<'a>(world: &'a mut World) -> impl Iterator<Item = Self::Items<'a>> {
-        let typeid = T0::type_id();
-        let bit = T0::bit(world);
-
-        world
-            .archetypes()
-            .iter()
-            .filter(move |archetype| archetype.bitmask & bit == bit)
-            .flat_map(move |archetype| {
-                let column = &archetype.columns[&typeid];
-                Some(T0::fetch(0, column))
-            })
+    #[inline]
+    fn release<'a>(column: &'a BlobData) {
+        column.release_mut()
     }
 }
 
+pub trait QueryState {
+    type Iter<'a>: Iterator;
+
+    fn prepare<'a>(world: &'a World) -> QueryIter<'a, Self>
+    where
+        Self: Sized;
+
+    fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>>;
+    fn release<'a>(archetype: &'a Archetype);
+}
+
+pub struct QueryIter<'a, Q: QueryState> {
+    archetypes: Vec<&'a Archetype>,
+    current_iter: Option<Q::Iter<'a>>,
+    current_archetype: Option<&'a Archetype>,
+}
+
+impl<'a, Q: QueryState> Iterator for QueryIter<'a, Q> {
+    type Item = <Q::Iter<'a> as Iterator>::Item;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(iter) = &mut self.current_iter {
+                if let Some(item) = iter.next() {
+                    return Some(item);
+                }
+            }
+
+            if let Some(arch) = self.current_archetype {
+                Q::release(arch);
+                self.current_archetype = None;
+                self.current_iter = None;
+            }
+
+            let next_arch = self.archetypes.pop()?;
+
+            self.current_iter = Q::create_iter(next_arch);
+            self.current_archetype = Some(next_arch);
+        }
+    }
+}
+
+impl<'a, Q: QueryState> Drop for QueryIter<'a, Q> {
+    fn drop(&mut self) {
+        if let Some(archetype) = self.current_archetype {
+            Q::release(archetype);
+        }
+    }
+}
+
+pub struct MultiZip<T>(pub T);
+
 macro_rules! impl_query_for_tuple {
-    ($($T:ident, $TID:ident, $BIT:ident, $COL:ident),+) => {
-        impl<$($T: Fetch + 'static),*> QueryItems for ($($T),*) {
-            type Items<'a> = ($($T::Item<'a>),*);
-            fn query_items<'a>(world: &'a mut World) -> impl Iterator<Item = Self::Items<'a>> {
+    ($($name:ident),*) => {
+
+        impl<$($name: Fetch),*> QueryState for ($($name,)*) {
+            type Iter<'a> = MultiZip<($($name::Chunk<'a>,)*)>;
+
+            fn prepare<'a>(world: &'a World) -> QueryIter<'a, Self> {
+                let mut bitmask = 0;
                 $(
-                    let $TID = $T::type_id();
-                    let $BIT = $T::bit(world);
+                    bitmask |= $name::bit(world);
                 )*
-                let mask = $($BIT |)* 0;
-                world
+
+                let mut archetypes = world
                     .archetypes()
                     .iter()
-                    .filter(move |archetype| archetype.bitmask & mask == mask)
-                    .flat_map(move |archetype| {
-                        $(
-                            let $COL = &archetype.columns[&$TID];
-                        )*
-                        (0..archetype.count).map(|i| ($($T::fetch(i, $COL)),*))
-                    })
+                    .filter(|arch| arch.bitmask & bitmask == bitmask)
+                    .collect::<Vec<_>>();
+
+                let current_archetype = archetypes.pop();
+                let current_iter = current_archetype.and_then(|arch| Self::create_iter(arch));
+
+                QueryIter {
+                    archetypes,
+                    current_iter,
+                    current_archetype,
+                }
+            }
+
+            #[inline]
+            fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>> {
+                Some(MultiZip((
+                    $(
+                        $name::take_chunk(archetype.columns.get(&$name::type_id())?),
+                    )*
+                )))
+            }
+
+            fn release<'a>(archetype: &'a Archetype) {
+                $(
+                    $name::release(archetype.columns.get(&$name::type_id()).unwrap());
+                )*
+            }
+        }
+
+        impl<$($name),*> Iterator for MultiZip<($($name,)*)>
+        where
+            $($name: Iterator),*
+        {
+            type Item = ($($name::Item,)*);
+
+            #[inline(always)]
+            fn next(&mut self) -> Option<Self::Item> {
+                #[allow(non_snake_case)]
+                let ($(ref mut $name,)*) = self.0;
+
+                Some((
+                    $(
+                        $name.next()?,
+                    )*
+                ))
             }
         }
     };
 }
 
-impl_query_for_tuple!(T0, t0, b0, col0, T1, t1, b1, col1);
-impl_query_for_tuple!(T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7, T8, t8, b8, col8
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7, T8, t8, b8, col8, T9, t9, b9, col9
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7, T8, t8, b8, col8, T9, t9, b9, col9, T10, t10,
-    b10, col10
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7, T8, t8, b8, col8, T9, t9, b9, col9, T10, t10,
-    b10, col10, T11, t11, b11, col11
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7, T8, t8, b8, col8, T9, t9, b9, col9, T10, t10,
-    b10, col10, T11, t11, b11, col11, T12, t12, b12, col12
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7, T8, t8, b8, col8, T9, t9, b9, col9, T10, t10,
-    b10, col10, T11, t11, b11, col11, T12, t12, b12, col12, T13, t13, b13, col13
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7, T8, t8, b8, col8, T9, t9, b9, col9, T10, t10,
-    b10, col10, T11, t11, b11, col11, T12, t12, b12, col12, T13, t13, b13, col13, T14, t14, b14,
-    col14
-);
-impl_query_for_tuple!(
-    T0, t0, b0, col0, T1, t1, b1, col1, T2, t2, b2, col2, T3, t3, b3, col3, T4, t4, b4, col4, T5,
-    t5, b5, col5, T6, t6, b6, col6, T7, t7, b7, col7, T8, t8, b8, col8, T9, t9, b9, col9, T10, t10,
-    b10, col10, T11, t11, b11, col11, T12, t12, b12, col12, T13, t13, b13, col13, T14, t14, b14,
-    col14, T15, t15, b15, col15
-);
+impl_query_for_tuple!(A);
+impl_query_for_tuple!(A, B);
+impl_query_for_tuple!(A, B, C);
+impl_query_for_tuple!(A, B, C, D);
+impl_query_for_tuple!(A, B, C, D, E);
+impl_query_for_tuple!(A, B, C, D, E, F);
+impl_query_for_tuple!(A, B, C, D, E, F, G);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H, I);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);

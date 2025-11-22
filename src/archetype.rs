@@ -1,8 +1,7 @@
 use std::{any::TypeId, collections::HashMap};
 
-use crate::{BlobData, TypeInfo};
+use crate::blob_data::{BlobData, TypeInfo};
 
-#[derive(Debug)]
 pub struct Archetype {
     pub columns: HashMap<TypeId, BlobData>,
     pub rows: Vec<usize>,
@@ -29,7 +28,7 @@ impl Archetype {
 
     pub fn insert(&mut self, id: TypeId, bytes: *mut u8) {
         if let Some(column) = self.columns.get_mut(&id) {
-            column.push(bytes);
+            column.push_bytes(bytes);
         }
     }
 
@@ -49,7 +48,7 @@ impl Archetype {
         for column in self.columns.values_mut() {
             if let Some(bytes) = column.swap_remove(index) {
                 unsafe {
-                    (column.info.drop)(bytes);
+                    (column.type_info().drop)(bytes);
                 }
             }
         }
@@ -68,11 +67,11 @@ impl Archetype {
     pub fn move_to(
         &mut self,
         index: usize,
-        mut f: impl FnMut(*mut u8, TypeId, TypeInfo),
+        mut f: impl FnMut(*mut u8, TypeId, &TypeInfo),
     ) -> Option<usize> {
         for (id, column) in &mut self.columns {
             if let Some(bytes) = column.swap_remove(index) {
-                f(bytes, *id, column.info);
+                f(bytes, *id, column.type_info());
             }
         }
 

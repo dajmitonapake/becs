@@ -1,11 +1,13 @@
 use std::{alloc::Layout, ptr::NonNull};
 
-#[derive(Debug)]
+use crate::borrow::AtomicBorrow;
+
 pub struct BlobData {
-    pub info: TypeInfo,
+    info: TypeInfo,
     ptr: Option<NonNull<u8>>,
     len: usize,
     capacity: usize,
+    borrow: AtomicBorrow,
 }
 
 impl BlobData {
@@ -15,6 +17,7 @@ impl BlobData {
             ptr: None,
             len: 0,
             capacity: 0,
+            borrow: AtomicBorrow::new(),
         }
     }
 
@@ -44,7 +47,11 @@ impl BlobData {
         }
     }
 
-    pub fn push(&mut self, bytes: *mut u8) {
+    pub fn push<T>(&mut self, mut value: T) {
+        self.push_bytes((&mut value as *mut T).cast());
+    }
+
+    pub(crate) fn push_bytes(&mut self, bytes: *mut u8) {
         if self.len == self.capacity {
             self.allocate(if self.capacity == 0 {
                 8
@@ -93,7 +100,7 @@ impl BlobData {
         }
     }
 
-    pub fn pop(&mut self) -> Option<*mut u8> {
+    pub(crate) fn pop(&mut self) -> Option<*mut u8> {
         let Some(ptr) = self.ptr else {
             return None;
         };
@@ -126,8 +133,50 @@ impl BlobData {
     }
 
     #[inline]
+    pub(crate) fn borrow(&self) -> bool {
+        self.borrow.borrow()
+    }
+
+    #[inline]
+    pub(crate) fn borrow_mut(&self) -> bool {
+        self.borrow.borrow_mut()
+    }
+
+    #[inline]
+    pub(crate) fn release(&self) {
+        self.borrow.release()
+    }
+
+    #[inline]
+    pub(crate) fn release_mut(&self) {
+        self.borrow.release_mut()
+    }
+
+    #[inline]
+    pub(crate) fn type_info(&self) -> &TypeInfo {
+        &self.info
+    }
+
+    #[inline]
     pub(crate) unsafe fn get_bytes(&self, index: usize) -> Option<*mut u8> {
-        unsafe { self.ptr.map(|ptr| ptr.as_ptr().add(index * self.info.size)) }
+        unsafe {
+            let ptr = self.ptr?;
+
+            Some(ptr.as_ptr().add(index * self.info.size))
+        }
+    }
+
+    #[inline]
+    pub unsafe fn as_slice<T>(&self) -> &[T] {
+        let ptr = self.ptr.unwrap().as_ptr() as *const T;
+
+        unsafe { std::slice::from_raw_parts(ptr, self.len) }
+    }
+
+    #[inline]
+    pub unsafe fn as_slice_mut<T>(&self) -> &mut [T] {
+        let ptr = self.ptr.unwrap().as_ptr() as *mut T;
+        unsafe { std::slice::from_raw_parts_mut(ptr, self.len) }
     }
 }
 
@@ -153,7 +202,7 @@ impl Drop for BlobData {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct TypeInfo {
     size: usize,
     align: usize,

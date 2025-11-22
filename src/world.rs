@@ -1,48 +1,68 @@
 use std::{any::TypeId, collections::HashMap};
 
-use crate::{Archetype, Bundle, QueryItems, TypeInfo};
+use crate::{
+    archetype::Archetype,
+    blob_data::TypeInfo,
+    bundle::Bundle,
+    query::{QueryIter, QueryState},
+};
 
-#[derive(Debug)]
 pub struct World {
     bitmap: HashMap<TypeId, u64>,
+    archetype_map: HashMap<u64, usize>,
     archetypes: Vec<Archetype>,
     entities: Entities,
     next_bitmask: u8,
 }
 
 impl World {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             bitmap: HashMap::new(),
+            archetype_map: HashMap::new(),
             archetypes: Vec::new(),
             entities: Entities::new(),
             next_bitmask: 0,
         }
     }
 
-    pub fn register_component<T: 'static>(&mut self) {
-        if self.bitmap.contains_key(&TypeId::of::<T>()) {
-            return;
+    /// Registers a [`Component`] type by giving it a unique bit which is returned.
+    /// It does nothing when the type is already registered.
+    /// Usually you should not use this function directly, because the components are registered automatically when you [`World::spawn`] an entity with a bundle.
+    pub fn register_component<T: Component>(&mut self) -> u64 {
+        if let Some(bit) = self.bitmap.get(&TypeId::of::<T>()) {
+            return *bit;
         }
-
-        self.bitmap
-            .insert(TypeId::of::<T>(), 1_u64 << self.next_bitmask);
+        let bit = 1_u64 << self.next_bitmask;
+        self.bitmap.insert(TypeId::of::<T>(), bit);
         self.next_bitmask += 1;
+        bit
     }
 
+    /// Spawns an [`Entity`] with the given components without an archetypal move, registers components when needed, use [`World::spawn_no_register`] if more performance is needed.
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         B::register(self);
 
-        let entity = self.entities.create();
         let bitmask = B::bitmask(self);
-        let archetype_idx = if let Some(archetype_idx) = self
-            .archetypes
-            .iter()
-            .position(|arch| arch.bitmask == bitmask)
-        {
-            archetype_idx
+        self.spawn_inner(bundle, bitmask)
+    }
+
+    /// Spawns an [`Entity`] with the given components without an archetypal move, does not register components, use [`World::spawn`] if you also need to register components.
+    pub fn spawn_no_register<B: Bundle>(&mut self, bundle: B) -> Entity {
+        let bitmask = B::bitmask(self);
+        self.spawn_inner(bundle, bitmask)
+    }
+
+    /// Inner method for spawning so there can be alternative spawn methods.
+    fn spawn_inner(&mut self, bundle: impl Bundle, bitmask: u64) -> Entity {
+        let entity = self.entities.create();
+        let archetype_idx = if let Some(archetype_idx) = self.archetype_map.get(&bitmask) {
+            *archetype_idx
         } else {
             self.archetypes.push(Archetype::new(bitmask));
+            self.archetype_map
+                .insert(bitmask, self.archetypes.len() - 1);
             self.archetypes.len() - 1
         };
 
@@ -59,11 +79,14 @@ impl World {
         entity
     }
 
+    /// Spawn an entity with no components. Location in the entity's meta is equal to [`Location::EMPTY`]. It is possible to check if the entity has a component using [`World::is_empty`].
     pub fn spawn_empty(&mut self) -> Entity {
         self.entities.create()
     }
 
-    pub fn insert_component<T: 'static>(&mut self, entity: Entity, mut component: T) {
+    /// Inserts a component into an entity. Does archetypal move if necessary (e.g. when the entity already has another components).
+    /// Inserting already existing component will overwrite it
+    pub fn insert_component<T: Component>(&mut self, entity: Entity, mut component: T) {
         if !self.is_alive(entity) {
             return;
         }
@@ -81,35 +104,50 @@ impl World {
         if let Some(source_arch) = source_archetype
             && source_arch.bitmask & bit == bit
         {
+            let meta = &self.entities.metas[entity.index];
+            // Get the mutable reference to the source archetype
+            let source_arch = &mut self.archetypes[meta.location.archetype];
+
+            // We are sure that the component exists, and the row is correct because we checked it earlier
+            let column = source_arch.columns.get_mut(&typeid).unwrap();
+
+            unsafe {
+                let ptr = column.get_bytes(meta.location.row).unwrap();
+                std::ptr::swap_nonoverlapping(ptr as *mut T, &mut component as *mut T, 1);
+
+                // Drop the old component
+                (column.type_info().drop)(ptr);
+            }
+            std::mem::forget(component);
+
             return;
         }
 
-        // Try to find existing archetype with needed bitmask, otherwise create a new one
-        let target_archetype_index = if let Some(archetype_index) =
-            self.archetypes.iter().position(|arch| {
-                if let Some(source_archetype) = source_archetype {
-                    return source_archetype.bitmask | bit == arch.bitmask;
-                }
-
-                arch.bitmask == bit
-            }) {
-            archetype_index
+        let target_bitmask = if let Some(source_archetype) = source_archetype {
+            source_archetype.bitmask | bit
         } else {
-            let bitmask = if let Some(source_archetype) = source_archetype {
-                source_archetype.bitmask | bit
-            } else {
-                bit
-            };
-            let archetype = Archetype::new(bitmask);
-            self.archetypes.push(archetype);
-            self.archetypes.len() - 1
+            bit
         };
+
+        // Try to find existing archetype with needed bitmask, otherwise create a new one
+        let target_archetype_index =
+            if let Some(archetype_index) = self.archetype_map.get(&target_bitmask) {
+                *archetype_index
+            } else {
+                // Insert new archetype and return its index
+                let archetype = Archetype::new(target_bitmask);
+                self.archetypes.push(archetype);
+                self.archetype_map
+                    .insert(target_bitmask, self.archetypes.len());
+                self.archetypes.len() - 1
+            };
 
         // We need to handle empty entities differently, because they don't have an source archetype yet
         if self.is_empty(entity) {
             let target_archetype = &mut self.archetypes[target_archetype_index];
             let row = target_archetype.count;
 
+            // Add the new component to the target archetype
             target_archetype.with(
                 typeid,
                 TypeInfo::new(
@@ -119,10 +157,13 @@ impl World {
                 ),
             );
             target_archetype.insert(typeid, &mut component as *mut T as *mut u8);
+
+            // Insert the new entity into the target archetype
             target_archetype.insert_row(entity.index);
 
             std::mem::forget(component);
 
+            // Update the entity's location metadata
             self.entities.metas[entity.index].location = Location {
                 archetype: target_archetype_index,
                 row,
@@ -141,7 +182,7 @@ impl World {
         let moved = source_archetype.move_to(
             self.entities.metas[entity.index].location.row,
             |bytes, typeid, typeinfo| {
-                target_archetype.with(typeid, typeinfo);
+                target_archetype.with(typeid, *typeinfo);
                 target_archetype.insert(typeid, bytes);
             },
         );
@@ -157,25 +198,32 @@ impl World {
             ),
         );
         target_archetype.insert(typeid, &mut component as *mut T as *mut u8);
+
+        // Insert the old entity into new archetype
         target_archetype.insert_row(entity.index);
         std::mem::forget(component);
 
         // If some entity has moved into this entity's previous location, we need to update it
         if let Some(moved) = moved {
             let meta = &self.entities.metas[entity.index];
+
+            // Update moved entity's location to the removed entity's location
             self.entities.metas[moved].location = Location {
                 archetype: meta.location.archetype,
                 row: meta.location.row,
             };
         }
 
+        // Update the entity's location to the new archetype and row
         self.entities.metas[entity.index].location = Location {
             archetype: target_archetype_index,
             row,
         };
     }
 
-    pub fn has_component<T: 'static>(&self, entity: Entity) -> bool {
+    /// Checks if the entity has the component of type `T`.
+    #[must_use]
+    pub fn has_component<T: Component>(&self, entity: Entity) -> bool {
         let Some(source_archetype) = self.archetype_of(entity) else {
             return false;
         };
@@ -187,8 +235,9 @@ impl World {
         source_archetype.bitmask & bit != 0
     }
 
-    pub fn remove_component<T: 'static>(&mut self, entity: Entity) {
-        if !self.is_alive(entity) {
+    /// Removes the component of type `T` from the entity. Does archetypal move if necessary.
+    pub fn remove_component<T: Component>(&mut self, entity: Entity) {
+        if !self.is_alive(entity) || self.is_empty(entity) {
             return;
         }
 
@@ -209,19 +258,24 @@ impl World {
 
         let combined_bitmask = source_archetype.bitmask & !bit;
 
+        // If it is the last component in the entity, remove the component and set the entity's location to EMPTY
         if combined_bitmask == 0 {
-            todo!("Removing last entity component is not supported yet")
+            let meta = &mut self.entities.metas[entity.index];
+            let source_archetype = &mut self.archetypes[meta.location.archetype];
+            source_archetype.swap_remove(meta.location.row);
+
+            meta.location = Location::EMPTY;
+            return;
         }
 
-        let target_archetype_index = if let Some(index) = self
-            .archetypes
-            .iter()
-            .position(|arch| arch.bitmask == combined_bitmask)
+        let target_archetype_index = if let Some(index) = self.archetype_map.get(&combined_bitmask)
         {
-            index
+            *index
         } else {
             let new_archetype = Archetype::new(combined_bitmask);
             self.archetypes.push(new_archetype);
+            self.archetype_map
+                .insert(combined_bitmask, self.archetypes.len() - 1);
             self.archetypes.len() - 1
         };
 
@@ -231,6 +285,7 @@ impl World {
             target_archetype_index,
         );
 
+        // Move remaining components from source archetype to target archetype and drop the removed one
         let moved = source_archetype.move_to(
             self.entities.metas[entity.index].location.row,
             |bytes, typeid, typeinfo| {
@@ -241,7 +296,7 @@ impl World {
                     }
                     return;
                 }
-                target_archetype.with(typeid, typeinfo);
+                target_archetype.with(typeid, *typeinfo);
                 target_archetype.insert(typeid, bytes);
             },
         );
@@ -257,13 +312,16 @@ impl World {
             };
         }
 
+        // Update the entity's location to the new archetype and row
         self.entities.metas[entity.index].location = Location {
             archetype: target_archetype_index,
             row: target_archetype.count - 1,
         };
     }
 
-    pub fn get_component<T: 'static>(&self, entity: Entity) -> Option<&T> {
+    /// Returns an immutable reference to the `T` component in the given entity.
+    #[must_use]
+    pub fn get_component<T: Component>(&self, entity: Entity) -> Option<&T> {
         if !self.is_alive(entity) {
             return None;
         }
@@ -275,6 +333,21 @@ impl World {
         Some(component)
     }
 
+    /// Returns a mutable reference to the `T` component in the given entity.
+    #[must_use]
+    pub fn get_component_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+
+        let meta = &mut self.entities.metas[entity.index];
+        let archetype = self.archetypes.get_mut(meta.location.archetype)?;
+        let bytes = archetype.get_bytes(TypeId::of::<T>(), meta.location.row)?;
+        let component = unsafe { &mut *(bytes as *mut T) };
+        Some(component)
+    }
+
+    /// Despawns the given entity.
     pub fn despawn_entity(&mut self, entity: Entity) {
         let Some(meta) = self.entities.metas.get(entity.index) else {
             return;
@@ -282,7 +355,7 @@ impl World {
 
         let location = meta.location;
 
-        if meta.generation != entity.generation || meta.location == Location::EMPTY {
+        if !self.is_alive(entity) {
             return;
         }
 
@@ -302,23 +375,33 @@ impl World {
         self.entities.free.push(entity.index);
     }
 
-    pub fn query<'a, Q: QueryItems>(&'a mut self) -> impl Iterator<Item = Q::Items<'a>> {
-        Q::query_items(self)
+    #[inline]
+    #[must_use]
+    pub fn query<'a, Q: QueryState>(&'a self) -> QueryIter<'a, Q> {
+        Q::prepare(self)
     }
 
+    #[inline]
+    #[must_use]
     pub(crate) fn archetypes(&self) -> &Vec<Archetype> {
         &self.archetypes
     }
 
+    #[inline]
+    #[must_use]
     pub(crate) fn archetype_of(&self, entity: Entity) -> Option<&Archetype> {
         let id = self.entities.metas.get(entity.index)?.location.archetype;
         self.archetypes.get(id)
     }
 
+    #[inline]
+    #[must_use]
     pub(crate) fn bit_of<T: 'static>(&self) -> Option<u64> {
         self.bitmap.get(&TypeId::of::<T>()).copied()
     }
 
+    #[inline]
+    #[must_use]
     pub(crate) fn is_empty(&self, entity: Entity) -> bool {
         self.entities
             .metas
@@ -326,6 +409,8 @@ impl World {
             .map_or(true, |meta| meta.location == Location::EMPTY)
     }
 
+    #[inline]
+    #[must_use]
     pub(crate) fn is_alive(&self, entity: Entity) -> bool {
         self.entities
             .metas
@@ -407,3 +492,7 @@ fn index2<T>(x: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
     let ptr = x.as_mut_ptr();
     unsafe { (&mut *ptr.add(i), &mut *ptr.add(j)) }
 }
+
+pub trait Component: 'static {}
+
+impl<T: 'static> Component for T {}
