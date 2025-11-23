@@ -88,7 +88,7 @@ impl World {
 
     /// Inserts a component into an entity. Does archetypal move if necessary (e.g. when the entity already has another components).
     /// Inserting already existing component will overwrite it. ZST are also supported
-    pub fn insert_component<T: Component>(&mut self, entity: Entity, mut component: T) {
+    pub fn insert_component<T: Component>(&mut self, entity: Entity, component: T) {
         // TODO: Improve performance, add safety checks and comments, do not use blob data API directly
         if !self.is_alive(entity) {
             return;
@@ -116,10 +116,14 @@ impl World {
 
             unsafe {
                 let ptr = column.get_bytes(meta.location.row);
-                std::ptr::swap_nonoverlapping(ptr as *mut T, &mut component as *mut T, 1);
 
                 // Drop the old component
                 column.type_info().call_drop(ptr);
+                std::ptr::copy_nonoverlapping(
+                    &component as *const T as *const u8,
+                    ptr,
+                    column.type_info().size,
+                );
             }
             std::mem::forget(component);
 
@@ -141,7 +145,7 @@ impl World {
                 let archetype = Archetype::new(target_bitmask);
                 self.archetypes.push(archetype);
                 self.archetype_map
-                    .insert(target_bitmask, self.archetypes.len());
+                    .insert(target_bitmask, self.archetypes.len() - 1);
                 self.archetypes.len() - 1
             };
 
@@ -370,6 +374,19 @@ impl World {
     #[must_use]
     pub fn query_filtered<'a, Q: QueryState<F>, F: Filter>(&'a mut self) -> QueryIter<'a, Q, F> {
         Q::prepare(&self.archetypes, &self.bitmap, &mut self.cache)
+    }
+
+    #[inline]
+    pub fn query_chunks<'a, Q: QueryState<()>>(&'a mut self, f: impl FnMut(Q::Slices<'a>)) {
+        self.query_chunks_filtered::<Q, ()>(f);
+    }
+
+    #[inline]
+    pub fn query_chunks_filtered<'a, Q: QueryState<F>, F: Filter>(
+        &'a mut self,
+        f: impl FnMut(Q::Slices<'a>),
+    ) {
+        Q::for_each_chunk(&self.archetypes, &self.bitmap, &mut self.cache, f);
     }
 
     #[inline]

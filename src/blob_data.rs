@@ -260,8 +260,8 @@ impl Drop for BlobData {
 
 #[derive(Clone, Copy)]
 pub struct TypeInfo {
-    size: usize,
-    align: usize,
+    pub(crate) size: usize,
+    pub(crate) align: usize,
     drop: unsafe fn(*mut u8),
 }
 

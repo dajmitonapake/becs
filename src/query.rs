@@ -7,17 +7,66 @@ use crate::{
 
 pub trait Fetch {
     type Item<'a>;
+
     type Chunk<'a>: Iterator<Item = Self::Item<'a>>;
+    type Slice<'a>;
 
     fn bit(bitmap: &HashMap<TypeId, u64>) -> u64;
     fn type_id() -> TypeId;
+
     fn access_chunk<'a>(archetype: &'a Archetype) -> Option<Self::Chunk<'a>>;
+    fn access_slice<'a>(archetype: &'a Archetype) -> Option<Self::Slice<'a>>;
+
     fn release<'a>(archetype: &'a Archetype);
 }
 
 impl<T: Component> Fetch for &T {
     type Item<'a> = &'a T;
     type Chunk<'a> = std::slice::Iter<'a, T>;
+    type Slice<'a> = &'a [T];
+
+    #[inline]
+    fn bit(bitmap: &HashMap<TypeId, u64>) -> u64 {
+        bitmap[&TypeId::of::<T>()]
+    }
+
+    #[inline]
+    fn type_id() -> TypeId {
+        TypeId::of::<T>()
+    }
+
+    #[inline]
+    fn access_chunk<'a>(archetype: &'a Archetype) -> Option<Self::Chunk<'a>> {
+        let column = archetype.column(&TypeId::of::<T>())?;
+
+        if !column.borrow() {
+            panic!("Conflicting queries: Could not o,mutably borrow query");
+        }
+        unsafe { Some(column.as_slice().iter()) } // SAFETY: We are taking a chunk only if the archetype's length is greater than 0
+    }
+
+    #[inline]
+    fn access_slice<'a>(archetype: &'a Archetype) -> Option<Self::Slice<'a>> {
+        let column = archetype.column(&TypeId::of::<T>())?;
+
+        if !column.borrow() {
+            panic!("Conflicting queries: Could not o,mutably borrow query");
+        }
+        unsafe { Some(column.as_slice()) } // SAFETY: We are taking a slice only if the archetype's length is greater than 0
+    }
+
+    #[inline]
+    fn release<'a>(archetype: &'a Archetype) {
+        if let Some(column) = archetype.column(&TypeId::of::<T>()) {
+            column.release();
+        }
+    }
+}
+
+impl<T: Component> Fetch for &mut T {
+    type Item<'a> = &'a mut T;
+    type Chunk<'a> = std::slice::IterMut<'a, T>;
+    type Slice<'a> = &'a mut [T];
 
     #[inline]
     fn bit(bitmap: &HashMap<TypeId, u64>) -> u64 {
@@ -36,7 +85,17 @@ impl<T: Component> Fetch for &T {
         if !column.borrow_mut() {
             panic!("Conflicting queries: Could not mutably borrow query");
         }
-        unsafe { Some(column.as_slice().iter()) } // SAFETY: We are taking a chunk only if the archetype's length is greater than 0
+        unsafe { Some(column.as_slice_mut().iter_mut()) } // SAFETY: We are taking a chunk only if the archetype's length is greater than 0
+    }
+
+    #[inline]
+    fn access_slice<'a>(archetype: &'a Archetype) -> Option<Self::Slice<'a>> {
+        let column = archetype.column(&TypeId::of::<T>())?;
+
+        if !column.borrow_mut() {
+            panic!("Conflicting queries: Could not mutably borrow query");
+        }
+        unsafe { Some(column.as_slice_mut()) } // SAFETY: We are taking a slice only if the archetype's length is greater than 0
     }
 
     #[inline]
@@ -47,41 +106,10 @@ impl<T: Component> Fetch for &T {
     }
 }
 
-impl<T: Component> Fetch for &mut T {
-    type Item<'a> = &'a mut T;
-    type Chunk<'a> = std::slice::IterMut<'a, T>;
-
-    #[inline]
-    fn bit(bitmap: &HashMap<TypeId, u64>) -> u64 {
-        bitmap[&TypeId::of::<T>()]
-    }
-
-    #[inline]
-    fn type_id() -> TypeId {
-        TypeId::of::<T>()
-    }
-
-    #[inline]
-    fn access_chunk<'a>(archetype: &'a Archetype) -> Option<Self::Chunk<'a>> {
-        let column = archetype.column(&TypeId::of::<T>())?;
-
-        if !column.borrow() {
-            panic!("Conflicting queries: Could not immutably borrow query");
-        }
-        unsafe { Some(column.as_slice_mut().iter_mut()) } // SAFETY: We are taking a chunk only if the archetype's length is greater than 0
-    }
-
-    #[inline]
-    fn release<'a>(archetype: &'a Archetype) {
-        if let Some(column) = archetype.column(&TypeId::of::<T>()) {
-            column.release();
-        }
-    }
-}
-
 impl Fetch for Entity {
     type Item<'a> = Entity;
     type Chunk<'a> = std::iter::Copied<std::slice::Iter<'a, Entity>>;
+    type Slice<'a> = &'a [Entity];
 
     #[inline]
     fn bit(_bitmap: &HashMap<TypeId, u64>) -> u64 {
@@ -96,6 +124,11 @@ impl Fetch for Entity {
     #[inline]
     fn access_chunk<'a>(archetype: &'a Archetype) -> Option<Self::Chunk<'a>> {
         Some(archetype.entities().iter().copied())
+    }
+
+    #[inline]
+    fn access_slice<'a>(archetype: &'a Archetype) -> Option<Self::Slice<'a>> {
+        Some(archetype.entities().as_slice())
     }
 
     #[inline]
@@ -173,18 +206,41 @@ impl<'a, Q: QueryState<F>, F: Filter> Iterator for QueryIter<'a, Q, F> {
             self.current_archetype = Some(next_arch);
         }
     }
-}
 
-impl<'a, Q: QueryState<F>, F: Filter> Drop for QueryIter<'a, Q, F> {
-    fn drop(&mut self) {
-        if let Some(archetype) = self.current_archetype {
-            Q::release(archetype);
+    #[inline(always)]
+    fn for_each<Func>(mut self, mut f: Func)
+    where
+        Func: FnMut(Self::Item),
+    {
+        if let Some(iter) = self.current_iter {
+            iter.for_each(&mut f);
         }
+
+        if let Some(arch) = self.current_archetype {
+            Q::release(arch);
+        }
+
+        for &arch_index in self.indices.as_slice() {
+            let next_arch = &self.archetypes[arch_index];
+            if next_arch.count() == 0 {
+                continue;
+            }
+
+            if let Some(iter) = Q::create_iter(next_arch) {
+                iter.for_each(&mut f);
+
+                Q::release(next_arch);
+            }
+        }
+
+        self.current_archetype = None;
+        self.current_iter = None;
     }
 }
 
 pub trait QueryState<F: Filter = ()> {
     type Iter<'a>: Iterator;
+    type Slices<'a>;
 
     fn prepare<'a>(
         archetypes: &'a Vec<Archetype>,
@@ -195,6 +251,15 @@ pub trait QueryState<F: Filter = ()> {
         Self: Sized;
 
     fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>>;
+    fn for_each_chunk<'a, Func>(
+        archetypes: &'a Vec<Archetype>,
+        bitmap: &HashMap<TypeId, u64>,
+        cache: &'a mut QueryCache,
+        f: Func,
+    ) where
+        Self: Sized,
+        Func: FnMut(Self::Slices<'a>);
+
     fn release<'a>(archetype: &'a Archetype);
 }
 
@@ -202,6 +267,7 @@ pub struct MultiZip<T>(pub T);
 
 impl<F: Filter, A: Fetch> QueryState<F> for A {
     type Iter<'a> = A::Chunk<'a>;
+    type Slices<'a> = A::Slice<'a>;
 
     fn prepare<'a>(
         archetypes: &'a Vec<Archetype>,
@@ -238,21 +304,66 @@ impl<F: Filter, A: Fetch> QueryState<F> for A {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>> {
         A::access_chunk(archetype)
     }
 
-    #[inline]
+    fn for_each_chunk<'a, Func>(
+        archetypes: &'a Vec<Archetype>,
+        bitmap: &HashMap<TypeId, u64>,
+        cache: &'a mut QueryCache,
+        mut f: Func,
+    ) where
+        Self: Sized,
+        Func: FnMut(Self::Slices<'a>),
+    {
+        let required_bitmask = A::bit(bitmap);
+        let (required_bitmask, exclusion_bitmask) = F::combine(required_bitmask, 0, bitmap);
+
+        let cache = cache.get_or_insert_with(required_bitmask, exclusion_bitmask, CacheEntry::new);
+        let archetypes_length = archetypes.len();
+
+        if cache.high_water_mark < archetypes_length {
+            for i in cache.high_water_mark..archetypes_length {
+                let archetype = &archetypes[i];
+
+                let required_passes = (archetype.bitmask() & required_bitmask) == required_bitmask;
+                let exclusion_passes = (archetype.bitmask() & exclusion_bitmask) == 0;
+
+                if required_passes && exclusion_passes {
+                    cache.archetypes.push(i);
+                }
+            }
+            cache.high_water_mark = archetypes_length;
+        }
+
+        for &index in &cache.archetypes {
+            let archetype = &archetypes[index];
+
+            if archetype.count() == 0 {
+                continue;
+            }
+
+            if let Some(slice) = A::access_slice(archetype) {
+                f(slice);
+                A::release(archetype);
+            }
+        }
+    }
+
+    #[inline(always)]
     fn release<'a>(archetype: &'a Archetype) {
         A::release(archetype);
     }
 }
+
 macro_rules! impl_query_for_tuple {
     ($($name:ident),*) => {
 
         impl<F: Filter, $($name: Fetch),*> QueryState<F> for ($($name,)*) {
             type Iter<'a> = MultiZip<($($name::Chunk<'a>,)*)>;
+            type Slices<'a> = ($($name::Slice<'a>,)*);
 
             fn prepare<'a>(
                 archetypes: &'a Vec<Archetype>,
@@ -294,6 +405,58 @@ macro_rules! impl_query_for_tuple {
                 )))
             }
 
+            fn for_each_chunk<'a, Func>(
+                archetypes: &'a Vec<Archetype>,
+                bitmap: &HashMap<TypeId, u64>,
+                cache: &'a mut QueryCache,
+                mut f: Func
+            )
+            where
+                Self: Sized,
+                Func: FnMut(Self::Slices<'a>)
+            {
+                let mut required_bitmask = 0;
+                $( required_bitmask |= $name::bit(bitmap); )*
+                let (required_bitmask, exclusion_bitmask) = F::combine(required_bitmask, 0, bitmap);
+
+                let cache = cache.get_or_insert_with(required_bitmask, exclusion_bitmask, CacheEntry::new);
+                let archetypes_length = archetypes.len();
+
+                if cache.high_water_mark < archetypes_length {
+                    for i in cache.high_water_mark..archetypes_length {
+                        let archetype = &archetypes[i];
+                        if (archetype.bitmask() & required_bitmask) == required_bitmask
+                            && (archetype.bitmask() & exclusion_bitmask) == 0 {
+                            cache.archetypes.push(i);
+                        }
+                    }
+                    cache.high_water_mark = archetypes_length;
+                }
+
+                for &index in &cache.archetypes {
+                    let archetype = &archetypes[index];
+
+                    if archetype.count() == 0 { continue; }
+
+                    let slices = (
+                        $(
+                            match $name::access_slice(archetype) {
+                                Some(s) => s,
+                                None => {
+                                    panic!("Archetype matches mask but missing column");
+                                }
+                            },
+                        )*
+                    );
+
+                    f(slices);
+
+                    $(
+                        $name::release(archetype);
+                    )*
+                }
+            }
+
             #[inline]
             fn release<'a>(archetype: &'a Archetype) {
                 $(
@@ -325,7 +488,7 @@ macro_rules! impl_query_for_tuple {
         where
             $($name: ExactSizeIterator),*
         {
-            #[inline]
+            #[inline(always)]
             fn len(&self) -> usize {
                 self.0.0.len()
             }

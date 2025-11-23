@@ -11,8 +11,18 @@ impl Component for C {}
 fn main() {
     let mut world = World::new();
 
-    world.spawn((A(10), B(20), C));
-    world.spawn((A(300), B(400)));
+    let e = world.spawn_empty();
+
+    world.insert_component(e, A(3455));
+    world.remove_component::<A>(e);
+    world.insert_component(e, B(6789));
+    world.remove_component::<B>(e);
+    world.insert_component(e, C);
+    world.remove_component::<C>(e);
+
+    world.insert_component(e, A(3455));
+    world.insert_component(e, B(6789));
+    world.insert_component(e, C);
 
     for (a, b, _c) in world.query::<(&mut A, &mut B, &mut C)>() {
         a.0 += b.0;

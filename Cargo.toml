@@ -3,4 +3,14 @@ name = "becs"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[dev-dependencies]
+criterion = "0.7.0"
+bevy_ecs = "0.17.3"
+
+[[bench]]
+name = "becs"
+harness = false
+
+[[bench]]
+name = "bevy"
+harness = false
