@@ -3,13 +3,13 @@ use std::any::TypeId;
 use crate::{
     archetype::Archetype,
     blob_data::TypeInfo,
-    world::{Component, World},
+    world::{Component, Entity, World},
 };
 
 pub trait Bundle {
     fn register(world: &mut World);
     fn bitmask(world: &World) -> u64;
-    fn put(self, row: usize, archetype: &mut Archetype);
+    fn put(self, entity: Entity, archetype: &mut Archetype);
 }
 
 impl<T0: Component> Bundle for T0 {
@@ -21,11 +21,11 @@ impl<T0: Component> Bundle for T0 {
         world.bit_of::<T0>().unwrap()
     }
 
-    fn put(self, row: usize, archetype: &mut Archetype) {
+    fn put(self, entity: Entity, archetype: &mut Archetype) {
         archetype.with(TypeId::of::<T0>(), TypeInfo::of::<T0>());
 
         archetype.insert(self);
-        archetype.insert_row(row);
+        archetype.insert_row(entity);
     }
 }
 
@@ -44,7 +44,7 @@ macro_rules! impl_bundle_for_tuple {
                 )* 0
             }
 
-            fn put(self, row: usize, archetype: &mut Archetype) {
+            fn put(self, entity: Entity, archetype: &mut Archetype) {
                 $(
                     archetype.with(TypeId::of::<$T>(), TypeInfo::of::<$T>());
                 )*
@@ -53,7 +53,7 @@ macro_rules! impl_bundle_for_tuple {
                     archetype.insert(self.$N);
                 )*
 
-                archetype.insert_row(row);
+                archetype.insert_row(entity);
             }
         }
     };

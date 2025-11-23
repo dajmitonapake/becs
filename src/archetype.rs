@@ -2,12 +2,12 @@ use std::{any::TypeId, collections::HashMap};
 
 use crate::{
     blob_data::{BlobData, TypeInfo},
-    world::Component,
+    world::{Component, Entity},
 };
 
 pub struct Archetype {
     columns: HashMap<TypeId, BlobData>,
-    rows: Vec<usize>,
+    rows: Vec<Entity>,
     count: usize,
     bitmask: u64,
 }
@@ -43,10 +43,10 @@ impl Archetype {
         }
     }
 
-    pub fn insert_row(&mut self, entity_id: usize) {
+    pub fn insert_row(&mut self, entity: Entity) {
         self.count += 1;
 
-        self.rows.push(entity_id);
+        self.rows.push(entity);
     }
 
     pub fn get<T: Component>(&self, row: usize) -> Option<&T> {
@@ -63,7 +63,7 @@ impl Archetype {
             .map(|bytes| unsafe { &mut *bytes.cast() }) // SAFETY: We are getting bytes from the column containing T data, so it must be valid
     }
 
-    pub fn swap_remove(&mut self, index: usize) -> Option<usize> {
+    pub fn swap_remove(&mut self, index: usize) -> Option<Entity> {
         if index >= self.count {
             return None;
         }
@@ -91,7 +91,7 @@ impl Archetype {
         &mut self,
         index: usize,
         mut f: impl FnMut(*mut u8, TypeId, &TypeInfo),
-    ) -> Option<usize> {
+    ) -> Option<Entity> {
         if index >= self.count {
             return None;
         }
@@ -125,6 +125,12 @@ impl Archetype {
         }
 
         None
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn entities(&self) -> &Vec<Entity> {
+        &self.rows
     }
 
     #[inline]

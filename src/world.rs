@@ -71,7 +71,7 @@ impl World {
         let archetype = &mut self.archetypes[archetype_idx];
         let row = archetype.count();
 
-        bundle.put(row, archetype);
+        bundle.put(entity, archetype);
 
         self.entities.metas[entity.index].location = Location {
             archetype: archetype_idx,
@@ -155,7 +155,7 @@ impl World {
             target_archetype.insert(component);
 
             // Insert the new entity into the target archetype
-            target_archetype.insert_row(entity.index);
+            target_archetype.insert_row(entity);
 
             // Update the entity's location metadata
             self.entities.metas[entity.index].location = Location {
@@ -187,14 +187,14 @@ impl World {
         target_archetype.insert(component);
 
         // Insert the old entity into new archetype
-        target_archetype.insert_row(entity.index);
+        target_archetype.insert_row(entity);
 
         // If some entity has moved into this entity's previous location, we need to update it
         if let Some(moved) = moved {
             let meta = &self.entities.metas[entity.index];
 
             // Update moved entity's location to the removed entity's location
-            self.entities.metas[moved].location = Location {
+            self.entities.metas[moved.index].location = Location {
                 archetype: meta.location.archetype,
                 row: meta.location.row,
             };
@@ -288,12 +288,12 @@ impl World {
             },
         );
 
-        target_archetype.insert_row(entity.index);
+        target_archetype.insert_row(entity);
 
         // If some entity has moved into this entity's previous location, we need to update it
         if let Some(moved) = moved {
             let meta = &self.entities.metas[entity.index];
-            self.entities.metas[moved].location = Location {
+            self.entities.metas[moved.index].location = Location {
                 archetype: meta.location.archetype,
                 row: meta.location.row,
             };
@@ -346,7 +346,7 @@ impl World {
             return;
         };
         if let Some(moved) = archetype.swap_remove(meta.location.row) {
-            let moved_meta = &mut self.entities.metas[moved];
+            let moved_meta = &mut self.entities.metas[moved.index];
             moved_meta.location = location;
         }
 
