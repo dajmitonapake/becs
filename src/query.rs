@@ -132,6 +132,10 @@ impl<'a, Q: QueryState<F>, F: Filter> Iterator for QueryIter<'a, Q, F> {
 
             let next_arch = &self.archetypes[*arch_index];
 
+            if next_arch.count() == 0 {
+                continue;
+            }
+
             self.current_iter = Q::create_iter(next_arch);
             self.current_archetype = Some(next_arch);
         }
