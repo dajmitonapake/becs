@@ -3,7 +3,7 @@ use std::{any::TypeId, collections::HashMap};
 use crate::{
     archetype::Archetype,
     blob_data::BlobData,
-    world::{CacheEntry, QueryCache},
+    world::{CacheEntry, Component, QueryCache},
 };
 
 pub trait Fetch {
@@ -72,15 +72,45 @@ impl<T: 'static> Fetch for &mut T {
     }
 }
 
-pub struct QueryIter<'a, Q: QueryState> {
+pub trait Filter {
+    fn combine(required: u64, exclusion: u64, bitmap: &HashMap<TypeId, u64>) -> (u64, u64);
+}
+
+impl Filter for () {
+    fn combine(required: u64, exclusion: u64, _bitmap: &HashMap<TypeId, u64>) -> (u64, u64) {
+        (required, exclusion)
+    }
+}
+
+pub struct With<T> {
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: Component> Filter for With<T> {
+    fn combine(required: u64, exclusion: u64, bitmap: &HashMap<TypeId, u64>) -> (u64, u64) {
+        (required | bitmap[&TypeId::of::<T>()], exclusion)
+    }
+}
+
+pub struct Without<T> {
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: Component> Filter for Without<T> {
+    fn combine(required: u64, exclusion: u64, bitmap: &HashMap<TypeId, u64>) -> (u64, u64) {
+        let bit = bitmap[&TypeId::of::<T>()];
+        (required & !bit, exclusion | bit)
+    }
+}
+
+pub struct QueryIter<'a, Q: QueryState<F>, F: Filter> {
     archetypes: &'a [Archetype],
-    indices: Vec<usize>,
-    cursor: usize,
+    indices: std::slice::Iter<'a, usize>,
     current_iter: Option<Q::Iter<'a>>,
     current_archetype: Option<&'a Archetype>,
 }
 
-impl<'a, Q: QueryState> Iterator for QueryIter<'a, Q> {
+impl<'a, Q: QueryState<F>, F: Filter> Iterator for QueryIter<'a, Q, F> {
     type Item = <Q::Iter<'a> as Iterator>::Item;
 
     #[inline(always)]
@@ -98,14 +128,9 @@ impl<'a, Q: QueryState> Iterator for QueryIter<'a, Q> {
                 self.current_iter = None;
             }
 
-            if self.cursor >= self.indices.len() {
-                return None;
-            }
+            let arch_index = self.indices.next()?;
 
-            let arch_index = self.indices[self.cursor];
-            self.cursor += 1;
-
-            let next_arch = &self.archetypes[arch_index];
+            let next_arch = &self.archetypes[*arch_index];
 
             self.current_iter = Q::create_iter(next_arch);
             self.current_archetype = Some(next_arch);
@@ -113,7 +138,7 @@ impl<'a, Q: QueryState> Iterator for QueryIter<'a, Q> {
     }
 }
 
-impl<'a, Q: QueryState> Drop for QueryIter<'a, Q> {
+impl<'a, Q: QueryState<F>, F: Filter> Drop for QueryIter<'a, Q, F> {
     fn drop(&mut self) {
         if let Some(archetype) = self.current_archetype {
             Q::release(archetype);
@@ -121,14 +146,14 @@ impl<'a, Q: QueryState> Drop for QueryIter<'a, Q> {
     }
 }
 
-pub trait QueryState {
+pub trait QueryState<F: Filter = ()> {
     type Iter<'a>: Iterator;
 
     fn prepare<'a>(
         archetypes: &'a Vec<Archetype>,
         bitmap: &HashMap<TypeId, u64>,
-        cache: &mut QueryCache,
-    ) -> QueryIter<'a, Self>
+        cache: &'a mut QueryCache,
+    ) -> QueryIter<'a, Self, F>
     where
         Self: Sized;
 
@@ -141,23 +166,28 @@ pub struct MultiZip<T>(pub T);
 macro_rules! impl_query_for_tuple {
     ($($name:ident),*) => {
 
-        impl<$($name: Fetch),*> QueryState for ($($name,)*) {
+        impl<F: Filter, $($name: Fetch),*> QueryState<F> for ($($name,)*) {
             type Iter<'a> = MultiZip<($($name::Chunk<'a>,)*)>;
 
-            fn prepare<'a>(archetypes: &'a Vec<Archetype>, bitmap: &HashMap<TypeId, u64>, cache: &mut QueryCache) -> QueryIter<'a, Self> {
-                let mut bitmask = 0;
+            fn prepare<'a>(archetypes: &'a Vec<Archetype>, bitmap: &HashMap<TypeId, u64>, cache: &'a mut QueryCache) -> QueryIter<'a, Self, F> {
+                let mut required_bitmask = 0;
                 $(
-                    bitmask |= $name::bit(bitmap);
+                    required_bitmask |= $name::bit(bitmap);
                 )*
 
-                let cache = cache.get_or_insert_with(bitmask, CacheEntry::new);
+                let (required_bitmask, exclusion_bitmask) = F::combine(required_bitmask, 0, bitmap);
+
+                let cache = cache.get_or_insert_with(required_bitmask, exclusion_bitmask, CacheEntry::new);
                 let archetypes_length = archetypes.len();
 
                 if cache.high_water_mark < archetypes_length {
                     for i in cache.high_water_mark..archetypes_length {
                         let archetype = &archetypes[i];
 
-                        if archetype.bitmask & bitmask == bitmask {
+                        let required_passes = (archetype.bitmask & required_bitmask) == required_bitmask;
+                        let exclusion_passes = (archetype.bitmask & exclusion_bitmask) == 0;
+
+                        if required_passes && exclusion_passes {
                             cache.archetypes.push(i);
                         }
                     }
@@ -167,8 +197,7 @@ macro_rules! impl_query_for_tuple {
 
                 QueryIter {
                     archetypes: archetypes.as_slice(),
-                    indices: cache.archetypes.clone(),
-                    cursor: 0,
+                    indices: cache.archetypes.iter(),
                     current_iter: None,
                     current_archetype: None,
                 }
@@ -208,6 +237,17 @@ macro_rules! impl_query_for_tuple {
                 ))
             }
         }
+
+        impl<$($name),*> ExactSizeIterator for MultiZip<($($name,)*)>
+        where
+            $($name: ExactSizeIterator),*
+        {
+            fn len(&self) -> usize {
+                #[allow(non_snake_case)]
+                let ($(ref $name,)*) = self.0;
+                0 $( + $name.len() )*
+            }
+        }
     };
 }
 
@@ -216,14 +256,46 @@ impl_query_for_tuple!(A, B);
 impl_query_for_tuple!(A, B, C);
 impl_query_for_tuple!(A, B, C, D);
 impl_query_for_tuple!(A, B, C, D, E);
-impl_query_for_tuple!(A, B, C, D, E, F);
-impl_query_for_tuple!(A, B, C, D, E, F, G);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H, I);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
-impl_query_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+impl_query_for_tuple!(A, B, C, D, E, F0);
+impl_query_for_tuple!(A, B, C, D, E, F0, G);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H, I);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H, I, J);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H, I, J, K);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H, I, J, K, L);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H, I, J, K, L, M);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H, I, J, K, L, M, N);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H, I, J, K, L, M, N, O);
+impl_query_for_tuple!(A, B, C, D, E, F0, G, H, I, J, K, L, M, N, O, P);
+
+macro_rules! impl_filter_for_tuple {
+    ($($name:ident),+ $(,)?) => {
+        impl<$($name: Filter),+> Filter for ($($name,)+) {
+            fn combine(required: u64, exclusion: u64, bitmap: &HashMap<TypeId, u64>) -> (u64, u64) {
+                let (mut required, mut exclusion) = (required, exclusion);
+                $(
+                    let (r, e) = $name::combine(required, exclusion, bitmap);
+                    required = r;
+                    exclusion = e;
+                )+
+                (required, exclusion)
+            }
+        }
+    };
+}
+
+impl_filter_for_tuple!(A, B);
+impl_filter_for_tuple!(A, B, C);
+impl_filter_for_tuple!(A, B, C, D);
+impl_filter_for_tuple!(A, B, C, D, E);
+impl_filter_for_tuple!(A, B, C, D, E, F);
+impl_filter_for_tuple!(A, B, C, D, E, F, G);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H, I);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_filter_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);

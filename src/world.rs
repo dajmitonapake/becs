@@ -4,7 +4,7 @@ use crate::{
     archetype::Archetype,
     blob_data::TypeInfo,
     bundle::Bundle,
-    query::{QueryIter, QueryState},
+    query::{Filter, QueryIter, QueryState},
 };
 
 pub struct World {
@@ -379,7 +379,13 @@ impl World {
 
     #[inline]
     #[must_use]
-    pub fn query<'a, Q: QueryState>(&'a mut self) -> QueryIter<'a, Q> {
+    pub fn query<'a, Q: QueryState<()>>(&'a mut self) -> QueryIter<'a, Q, ()> {
+        self.query_filtered::<Q, ()>()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn query_filtered<'a, Q: QueryState<F>, F: Filter>(&'a mut self) -> QueryIter<'a, Q, F> {
         Q::prepare(&self.archetypes, &self.bitmap, &mut self.cache)
     }
 
@@ -430,7 +436,8 @@ impl CacheEntry {
 }
 
 pub struct QueryCache {
-    cache: HashMap<u64, CacheEntry>,
+    // (required bitmask, exclusion bitmask)
+    cache: HashMap<(u64, u64), CacheEntry>,
 }
 
 impl QueryCache {
@@ -440,9 +447,15 @@ impl QueryCache {
         }
     }
 
-    pub fn insert(&mut self, bitmask: u64, high_water_mark: usize, archetypes: Vec<usize>) {
+    pub fn insert(
+        &mut self,
+        required_bitmask: u64,
+        exclusion_bitmask: u64,
+        high_water_mark: usize,
+        archetypes: Vec<usize>,
+    ) {
         self.cache.insert(
-            bitmask,
+            (required_bitmask, exclusion_bitmask),
             CacheEntry {
                 high_water_mark,
                 archetypes,
@@ -452,10 +465,13 @@ impl QueryCache {
 
     pub fn get_or_insert_with(
         &mut self,
-        bitmask: u64,
+        required_bitmask: u64,
+        exclusion_bitmask: u64,
         f: impl FnOnce() -> CacheEntry,
     ) -> &mut CacheEntry {
-        self.cache.entry(bitmask).or_insert_with(f)
+        self.cache
+            .entry((required_bitmask, exclusion_bitmask))
+            .or_insert_with(f)
     }
 }
 
