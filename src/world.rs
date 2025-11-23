@@ -152,12 +152,10 @@ impl World {
 
             // Add the new component to the target archetype
             target_archetype.with(typeid, TypeInfo::of::<T>());
-            target_archetype.insert_bytes(typeid, &mut component as *mut T as *mut u8);
+            target_archetype.insert(component);
 
             // Insert the new entity into the target archetype
             target_archetype.insert_row(entity.index);
-
-            std::mem::forget(component);
 
             // Update the entity's location metadata
             self.entities.metas[entity.index].location = Location {
@@ -186,11 +184,10 @@ impl World {
 
         // Insert the new component into new archetype
         target_archetype.with(typeid, TypeInfo::of::<T>());
-        target_archetype.insert_bytes(typeid, &mut component as *mut T as *mut u8);
+        target_archetype.insert(component);
 
         // Insert the old entity into new archetype
         target_archetype.insert_row(entity.index);
-        std::mem::forget(component);
 
         // If some entity has moved into this entity's previous location, we need to update it
         if let Some(moved) = moved {
