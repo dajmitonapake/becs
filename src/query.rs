@@ -35,7 +35,7 @@ impl<T: Component> Fetch for &T {
         if !column.borrow() {
             panic!("Conflicting queries: Could not immutably borrow query");
         }
-        unsafe { column.as_slice().iter() }
+        unsafe { column.as_slice().iter() } // SAFETY: We are taking a chunk only if the archetype's length is greater than 0
     }
 
     #[inline]
@@ -63,7 +63,7 @@ impl<T: Component> Fetch for &mut T {
             panic!("Conflicting queries: Could not mutably borrow query");
         }
 
-        unsafe { column.as_slice_mut().iter_mut() }
+        unsafe { column.as_slice_mut().iter_mut() } // SAFETY: We are taking a chunk only if the archetype's length is greater than 0
     }
 
     #[inline]
@@ -182,8 +182,8 @@ impl<F: Filter, A: Fetch> QueryState<F> for A {
             for i in cache.high_water_mark..archetypes_length {
                 let archetype = &archetypes[i];
 
-                let required_passes = (archetype.bitmask & required_bitmask) == required_bitmask;
-                let exclusion_passes = (archetype.bitmask & exclusion_bitmask) == 0;
+                let required_passes = (archetype.bitmask() & required_bitmask) == required_bitmask;
+                let exclusion_passes = (archetype.bitmask() & exclusion_bitmask) == 0;
 
                 if required_passes && exclusion_passes {
                     cache.archetypes.push(i);
@@ -203,11 +203,11 @@ impl<F: Filter, A: Fetch> QueryState<F> for A {
 
     #[inline]
     fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>> {
-        Some(A::take_chunk(archetype.columns.get(&A::type_id())?))
+        Some(A::take_chunk(archetype.column(&A::type_id())?))
     }
 
     fn release<'a>(archetype: &'a Archetype) {
-        A::release(archetype.columns.get(&A::type_id()).unwrap());
+        A::release(archetype.column(&A::type_id()).unwrap());
     }
 }
 macro_rules! impl_query_for_tuple {
@@ -231,8 +231,8 @@ macro_rules! impl_query_for_tuple {
                     for i in cache.high_water_mark..archetypes_length {
                         let archetype = &archetypes[i];
 
-                        let required_passes = (archetype.bitmask & required_bitmask) == required_bitmask;
-                        let exclusion_passes = (archetype.bitmask & exclusion_bitmask) == 0;
+                        let required_passes = (archetype.bitmask() & required_bitmask) == required_bitmask;
+                        let exclusion_passes = (archetype.bitmask() & exclusion_bitmask) == 0;
 
                         if required_passes && exclusion_passes {
                             cache.archetypes.push(i);
@@ -254,14 +254,14 @@ macro_rules! impl_query_for_tuple {
             fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>> {
                 Some(MultiZip((
                     $(
-                        $name::take_chunk(archetype.columns.get(&$name::type_id())?),
+                        $name::take_chunk(archetype.column(&$name::type_id())?),
                     )*
                 )))
             }
 
             fn release<'a>(archetype: &'a Archetype) {
                 $(
-                    $name::release(archetype.columns.get(&$name::type_id()).unwrap());
+                    $name::release(archetype.column(&$name::type_id()).unwrap());
                 )*
             }
         }

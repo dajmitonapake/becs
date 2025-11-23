@@ -21,19 +21,11 @@ impl<T0: Component> Bundle for T0 {
         world.bit_of::<T0>().unwrap()
     }
 
-    fn put(mut self, row: usize, archetype: &mut Archetype) {
-        archetype.with(
-            TypeId::of::<T0>(),
-            TypeInfo::new(
-                size_of::<T0>(),
-                align_of::<T0>(),
-                TypeInfo::default_drop::<T0>(),
-            ),
-        );
+    fn put(self, row: usize, archetype: &mut Archetype) {
+        archetype.with(TypeId::of::<T0>(), TypeInfo::of::<T0>());
 
-        archetype.insert(TypeId::of::<T0>(), (&mut self as *mut T0).cast::<u8>());
+        archetype.insert(self);
         archetype.insert_row(row);
-        std::mem::forget(self);
     }
 }
 
@@ -52,25 +44,16 @@ macro_rules! impl_bundle_for_tuple {
                 )* 0
             }
 
-            fn put(mut self, row: usize, archetype: &mut Archetype) {
+            fn put(self, row: usize, archetype: &mut Archetype) {
                 $(
-                    archetype.with(
-                        TypeId::of::<$T>(),
-                        TypeInfo::new(
-                            size_of::<$T>(),
-                            align_of::<$T>(),
-                            TypeInfo::default_drop::<$T>(),
-                        ),
-                    );
+                    archetype.with(TypeId::of::<$T>(), TypeInfo::of::<$T>());
                 )*
 
                 $(
-                    archetype.insert(TypeId::of::<$T>(), (&mut self.$N as *mut $T).cast::<u8>());
+                    archetype.insert(self.$N);
                 )*
 
                 archetype.insert_row(row);
-
-                std::mem::forget(self);
             }
         }
     };

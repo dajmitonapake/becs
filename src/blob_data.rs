@@ -54,10 +54,43 @@ impl BlobData {
     }
 
     pub fn push<T>(&mut self, mut value: T) {
-        self.push_bytes((&mut value as *mut T).cast());
+        debug_assert!(self.info.validate::<T>());
+
+        unsafe {
+            self.push_bytes((&mut value as *mut T).cast());
+        }
     }
 
-    pub(crate) fn push_bytes(&mut self, bytes: *mut u8) {
+    #[must_use]
+    pub fn get<T>(&self, index: usize) -> Option<&T> {
+        debug_assert!(self.info.validate::<T>());
+
+        if index >= self.len {
+            return None;
+        }
+
+        unsafe {
+            let bytes = self.get_bytes(index);
+            Some(&*(bytes as *const T))
+        }
+    }
+
+    #[must_use]
+    pub fn get_mut<T>(&self, index: usize) -> Option<&mut T> {
+        debug_assert!(self.info.validate::<T>());
+
+        if index >= self.len {
+            return None;
+        }
+
+        unsafe {
+            let bytes = self.get_bytes(index);
+            Some(&mut *(bytes as *mut T))
+        }
+    }
+
+    /// Caller must ensure that the bytes have the same layout as the type that this blob data was created for
+    pub(crate) unsafe fn push_bytes(&mut self, bytes: *mut u8) {
         if self.len == self.capacity {
             self.allocate(if self.capacity == 0 {
                 8
@@ -81,74 +114,103 @@ impl BlobData {
         }
     }
 
-    pub fn swap_remove(&mut self, index: usize) -> Option<*mut u8> {
-        if self.len == 0 || index >= self.len {
-            return None;
+    /// Caller must ensure that the index is within bounds
+    #[must_use]
+    pub(crate) unsafe fn swap_remove(&mut self, index: usize) -> *mut u8 {
+        debug_assert!(
+            index < self.len,
+            "Index for swap remove must be within bounds"
+        );
+
+        if index == self.len - 1 {
+            unsafe {
+                return self.pop();
+            }
         }
-
-        if index == self.len {
-            return self.pop();
-        }
-
-        self.swap(index, self.len - 1);
-        self.pop()
-    }
-
-    pub fn swap(&mut self, a: usize, b: usize) {
-        if a == b {
-            return;
-        }
-
-        let Some(ptr) = self.ptr else {
-            return;
-        };
 
         unsafe {
-            let a_ptr = ptr.as_ptr().add(a * self.info.size);
-            let b_ptr = ptr.as_ptr().add(b * self.info.size);
+            self.swap(index, self.len - 1);
+            self.pop()
+        }
+    }
+
+    /// Caller must ensure that the indices are different and within bounds
+    pub(crate) unsafe fn swap(&mut self, a: usize, b: usize) {
+        debug_assert!(a != b, "Indices for swap must be different");
+        debug_assert!(
+            a < self.len && b < self.len,
+            "Indices for swap must be within bounds"
+        );
+
+        unsafe {
+            let a_ptr = self.ptr.unwrap().as_ptr().add(a * self.info.size);
+            let b_ptr = self.ptr.unwrap().as_ptr().add(b * self.info.size);
 
             std::ptr::swap_nonoverlapping(a_ptr, b_ptr, self.info.size);
         }
     }
 
-    pub(crate) fn pop(&mut self) -> Option<*mut u8> {
-        let Some(ptr) = self.ptr else {
-            return None;
-        };
-
-        if self.len == 0 {
-            return None;
-        }
+    /// Caller must ensure that the length is not zero
+    #[must_use]
+    pub(crate) unsafe fn pop(&mut self) -> *mut u8 {
+        debug_assert!(self.len > 0, "Cannot pop from an empty blob");
 
         unsafe {
-            let last_ptr = ptr.as_ptr().add((self.len - 1) * self.info.size);
+            let last_ptr = self
+                .ptr
+                .unwrap()
+                .as_ptr()
+                .add((self.len - 1) * self.info.size);
             self.len -= 1;
-            Some(last_ptr)
+            last_ptr
         }
     }
 
-    /// Caller needs to ensure that the index is valid, method returns None only if there is no allocation, not when the data is not T or the index is out of bounds
-    pub fn get<T>(&self, index: usize) -> Option<&T> {
-        unsafe {
-            let bytes = self.get_bytes(index)?;
-            Some(&*(bytes as *const T))
-        }
+    /// Caller must ensure that the length is not zero, and is within bounds
+    #[inline]
+    #[must_use]
+    pub(crate) unsafe fn get_bytes(&self, index: usize) -> *mut u8 {
+        debug_assert!(self.len > 0, "Length must be greater than zero");
+
+        unsafe { self.ptr.unwrap().as_ptr().add(index * self.info.size) }
     }
 
-    /// Caller needs to ensure that the index is valid, method returns None only if there is no allocation, not when the data is not T or the index is out of bounds
-    pub fn get_mut<T>(&self, index: usize) -> Option<&mut T> {
-        unsafe {
-            let bytes = self.get_bytes(index)?;
-            Some(&mut *(bytes as *mut T))
-        }
+    /// Caller must ensure that the length is not zero
+    #[inline]
+    #[must_use]
+    pub(crate) unsafe fn as_slice<T>(&self) -> &[T] {
+        debug_assert!(
+            self.info.validate::<T>(),
+            "Attempted to access blob data with invalid type"
+        );
+        debug_assert!(self.len > 0, "Length must be greater than zero");
+
+        let ptr = self.ptr.unwrap().as_ptr() as *const T;
+        unsafe { std::slice::from_raw_parts(ptr, self.len) }
+    }
+
+    /// Caller must ensure that the length is not zero
+    #[inline]
+    #[must_use]
+    pub(crate) unsafe fn as_slice_mut<T>(&self) -> &mut [T] {
+        debug_assert!(
+            self.info.validate::<T>(),
+            "Attempted to access blob data with invalid type"
+        );
+        debug_assert!(self.len > 0, "Length must be greater than zero");
+
+        let ptr = self.ptr.unwrap().as_ptr() as *mut T;
+        unsafe { std::slice::from_raw_parts_mut(ptr, self.len) }
     }
 
     #[inline]
+    #[must_use]
     pub(crate) fn borrow(&self) -> bool {
         self.borrow.borrow()
     }
 
     #[inline]
+    #[must_use]
     pub(crate) fn borrow_mut(&self) -> bool {
         self.borrow.borrow_mut()
     }
@@ -164,29 +226,9 @@ impl BlobData {
     }
 
     #[inline]
+    #[must_use]
     pub(crate) fn type_info(&self) -> &TypeInfo {
         &self.info
-    }
-
-    #[inline]
-    pub(crate) unsafe fn get_bytes(&self, index: usize) -> Option<*mut u8> {
-        unsafe {
-            let ptr = self.ptr?;
-
-            Some(ptr.as_ptr().add(index * self.info.size))
-        }
-    }
-
-    #[inline]
-    pub unsafe fn as_slice<T>(&self) -> &[T] {
-        let ptr = self.ptr.unwrap().as_ptr() as *const T;
-        unsafe { std::slice::from_raw_parts(ptr, self.len) }
-    }
-
-    #[inline]
-    pub unsafe fn as_slice_mut<T>(&self) -> &mut [T] {
-        let ptr = self.ptr.unwrap().as_ptr() as *mut T;
-        unsafe { std::slice::from_raw_parts_mut(ptr, self.len) }
     }
 }
 
@@ -220,10 +262,18 @@ impl Drop for BlobData {
 pub struct TypeInfo {
     size: usize,
     align: usize,
-    pub drop: unsafe fn(*mut u8),
+    drop: unsafe fn(*mut u8),
 }
 
 impl TypeInfo {
+    pub fn of<T>() -> Self {
+        Self::new(
+            std::mem::size_of::<T>(),
+            std::mem::align_of::<T>(),
+            TypeInfo::default_drop::<T>(),
+        )
+    }
+
     pub fn new(size: usize, align: usize, drop: unsafe fn(*mut u8)) -> Self {
         TypeInfo { size, align, drop }
     }
@@ -235,5 +285,17 @@ impl TypeInfo {
             }
         }
         drop::<T>
+    }
+
+    pub unsafe fn call_drop(&self, ptr: *mut u8) {
+        unsafe {
+            (self.drop)(ptr);
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn validate<T>(&self) -> bool {
+        self.size == std::mem::size_of::<T>() && self.align == std::mem::align_of::<T>()
     }
 }

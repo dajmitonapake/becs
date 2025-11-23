@@ -1,12 +1,15 @@
 use std::{any::TypeId, collections::HashMap};
 
-use crate::blob_data::{BlobData, TypeInfo};
+use crate::{
+    blob_data::{BlobData, TypeInfo},
+    world::Component,
+};
 
 pub struct Archetype {
-    pub columns: HashMap<TypeId, BlobData>,
-    pub rows: Vec<usize>,
-    pub count: usize,
-    pub bitmask: u64,
+    columns: HashMap<TypeId, BlobData>,
+    rows: Vec<usize>,
+    count: usize,
+    bitmask: u64,
 }
 
 impl Archetype {
@@ -26,9 +29,17 @@ impl Archetype {
         self.columns.insert(id, BlobData::new(info));
     }
 
-    pub fn insert(&mut self, id: TypeId, bytes: *mut u8) {
+    pub fn insert<T: Component>(&mut self, mut component: T) {
+        let bytes = &mut component as *mut T as *mut u8;
+        self.insert_bytes(TypeId::of::<T>(), bytes);
+        std::mem::forget(component);
+    }
+
+    pub fn insert_bytes(&mut self, id: TypeId, bytes: *mut u8) {
         if let Some(column) = self.columns.get_mut(&id) {
-            column.push_bytes(bytes);
+            unsafe {
+                column.push_bytes(bytes); // SAFETY: We got a TypeId -> BlobData map so the type is correct
+            }
         }
     }
 
@@ -38,18 +49,29 @@ impl Archetype {
         self.rows.push(entity_id);
     }
 
-    pub fn get_bytes(&self, typeid: TypeId, row: usize) -> Option<*mut u8> {
-        let column = self.columns.get(&typeid)?;
+    pub fn get<T: Component>(&self, row: usize) -> Option<&T> {
+        let typeid = TypeId::of::<T>();
 
-        unsafe { column.get_bytes(row) }
+        self.get_bytes(typeid, row)
+            .map(|bytes| unsafe { &*bytes.cast() }) // SAFETY: We are getting bytes from the column containing T data, so it must be valid
+    }
+
+    pub fn get_mut<T: Component>(&mut self, row: usize) -> Option<&mut T> {
+        let typeid = TypeId::of::<T>();
+
+        self.get_bytes(typeid, row)
+            .map(|bytes| unsafe { &mut *bytes.cast() }) // SAFETY: We are getting bytes from the column containing T data, so it must be valid
     }
 
     pub fn swap_remove(&mut self, index: usize) -> Option<usize> {
+        if index >= self.count {
+            return None;
+        }
+
         for column in self.columns.values_mut() {
-            if let Some(bytes) = column.swap_remove(index) {
-                unsafe {
-                    (column.type_info().drop)(bytes);
-                }
+            unsafe {
+                let bytes = column.swap_remove(index); // SAFETY: We are checking the bounds above
+                column.type_info().call_drop(bytes); // and the data is removed from the column so the drop is safe
             }
         }
 
@@ -64,19 +86,21 @@ impl Archetype {
         Some(self.rows.pop().unwrap())
     }
 
+    #[must_use]
     pub fn move_to(
         &mut self,
         index: usize,
         mut f: impl FnMut(*mut u8, TypeId, &TypeInfo),
     ) -> Option<usize> {
-        for (id, column) in &mut self.columns {
-            if let Some(bytes) = column.swap_remove(index) {
-                f(bytes, *id, column.type_info());
-            }
+        if index >= self.count {
+            return None;
         }
 
-        if self.count == 0 || index >= self.count {
-            return None;
+        for (id, column) in &mut self.columns {
+            unsafe {
+                let bytes = column.swap_remove(index); // SAFETY: We are checking the bounds above
+                f(bytes, *id, column.type_info());
+            }
         }
 
         self.count -= 1;
@@ -88,5 +112,42 @@ impl Archetype {
         }
         self.rows.swap(index, self.count - 1);
         Some(self.rows.pop().unwrap())
+    }
+
+    #[must_use]
+    pub(crate) fn get_bytes(&self, typeid: TypeId, row: usize) -> Option<*mut u8> {
+        let column = self.columns.get(&typeid)?;
+
+        if self.count > row {
+            unsafe {
+                return Some(column.get_bytes(row)); // SAFETY: We are checking the bounds above
+            }
+        }
+
+        None
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn column(&self, id: &TypeId) -> Option<&BlobData> {
+        self.columns.get(id)
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn column_mut(&mut self, id: &TypeId) -> Option<&mut BlobData> {
+        self.columns.get_mut(id)
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn bitmask(&self) -> u64 {
+        self.bitmask
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn count(&self) -> usize {
+        self.count
     }
 }
