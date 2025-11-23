@@ -22,6 +22,12 @@ impl BlobData {
     }
 
     pub fn allocate(&mut self, needed_capacity: usize) {
+        if self.info.size == 0 {
+            self.ptr = Some(NonNull::dangling());
+            self.capacity = usize::MAX;
+            return;
+        }
+
         let new_capacity = needed_capacity;
 
         unsafe {
@@ -58,6 +64,11 @@ impl BlobData {
             } else {
                 self.capacity * 2
             });
+        }
+
+        if self.info.size == 0 {
+            self.len += 1;
+            return;
         }
 
         unsafe {
@@ -169,7 +180,6 @@ impl BlobData {
     #[inline]
     pub unsafe fn as_slice<T>(&self) -> &[T] {
         let ptr = self.ptr.unwrap().as_ptr() as *const T;
-
         unsafe { std::slice::from_raw_parts(ptr, self.len) }
     }
 
@@ -182,6 +192,10 @@ impl BlobData {
 
 impl Drop for BlobData {
     fn drop(&mut self) {
+        if self.info.size == 0 {
+            return;
+        }
+
         for i in 0..self.len {
             unsafe {
                 (self.info.drop)(self.ptr.unwrap().as_ptr().add(i * self.info.size));

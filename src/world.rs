@@ -42,7 +42,7 @@ impl World {
         bit
     }
 
-    /// Spawns an [`Entity`] with the given components without an archetypal move, registers components when needed, use [`World::spawn_no_register`] if more performance is needed.
+    /// Spawns an [`Entity`] with the given components without an archetypal move. Registers components when needed, use [`World::spawn_no_register`] if you don't want to.
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         B::register(self);
 
@@ -50,7 +50,7 @@ impl World {
         self.spawn_inner(bundle, bitmask)
     }
 
-    /// Spawns an [`Entity`] with the given components without an archetypal move, does not register components, use [`World::spawn`] if you also need to register components.
+    /// Spawns an [`Entity`] with the given components without an archetypal move. Does not register components, use [`World::spawn`] if you need to.
     pub fn spawn_no_register<B: Bundle>(&mut self, bundle: B) -> Entity {
         let bitmask = B::bitmask(self);
         self.spawn_inner(bundle, bitmask)
@@ -87,7 +87,7 @@ impl World {
     }
 
     /// Inserts a component into an entity. Does archetypal move if necessary (e.g. when the entity already has another components).
-    /// Inserting already existing component will overwrite it
+    /// Inserting already existing component will overwrite it. ZST are also supported
     pub fn insert_component<T: Component>(&mut self, entity: Entity, mut component: T) {
         if !self.is_alive(entity) {
             return;
@@ -377,12 +377,14 @@ impl World {
         self.entities.free.push(entity.index);
     }
 
+    /// Efficiently queries components without any filter. Stores [`QueryCache`] internally for faster future queries.
     #[inline]
     #[must_use]
     pub fn query<'a, Q: QueryState<()>>(&'a mut self) -> QueryIter<'a, Q, ()> {
         self.query_filtered::<Q, ()>()
     }
 
+    /// Returns an iterator over requested components with given filters. If you want don't want to filter the results, use [`World::query`].
     #[inline]
     #[must_use]
     pub fn query_filtered<'a, Q: QueryState<F>, F: Filter>(&'a mut self) -> QueryIter<'a, Q, F> {
