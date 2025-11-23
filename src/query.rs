@@ -80,7 +80,8 @@ pub trait QueryState {
 }
 
 pub struct QueryIter<'a, Q: QueryState> {
-    archetypes: Vec<&'a Archetype>,
+    archetype_iter: std::slice::Iter<'a, Archetype>,
+    bitmask: u64,
     current_iter: Option<Q::Iter<'a>>,
     current_archetype: Option<&'a Archetype>,
 }
@@ -103,7 +104,12 @@ impl<'a, Q: QueryState> Iterator for QueryIter<'a, Q> {
                 self.current_iter = None;
             }
 
-            let next_arch = self.archetypes.pop()?;
+            let next_arch = loop {
+                let arch = self.archetype_iter.next()?;
+                if arch.bitmask & self.bitmask == self.bitmask {
+                    break arch;
+                }
+            };
 
             self.current_iter = Q::create_iter(next_arch);
             self.current_archetype = Some(next_arch);
@@ -133,17 +139,16 @@ macro_rules! impl_query_for_tuple {
                     bitmask |= $name::bit(world);
                 )*
 
-                let mut archetypes = world
+                let mut archetype_iter = world
                     .archetypes()
-                    .iter()
-                    .filter(|arch| arch.bitmask & bitmask == bitmask)
-                    .collect::<Vec<_>>();
+                    .iter();
 
-                let current_archetype = archetypes.pop();
+                let current_archetype = archetype_iter.next();
                 let current_iter = current_archetype.and_then(|arch| Self::create_iter(arch));
 
                 QueryIter {
-                    archetypes,
+                    archetype_iter,
+                    bitmask,
                     current_iter,
                     current_archetype,
                 }
