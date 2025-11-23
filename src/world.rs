@@ -550,5 +550,3 @@ fn index2<T>(x: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
 }
 
 pub trait Component: 'static {}
-
-impl<T: 'static> Component for T {}

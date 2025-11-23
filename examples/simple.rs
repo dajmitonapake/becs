@@ -1,12 +1,23 @@
 use becs::prelude::*;
 
+struct A(i32);
+struct B(i32);
+
+impl Component for A {}
+impl Component for B {}
+
 fn main() {
     let mut world = World::new();
 
-    world.spawn((1, String::from("hello")));
-    world.spawn((2, String::from("world")));
+    world.spawn((A(10), B(20)));
+    world.spawn((A(30), B(40)));
 
-    for (number, text) in world.query::<(&i32, &String)>() {
-        println!("Entity {} has number {} and text {}", number, number, text);
+    for (a, b) in world.query::<(&mut A, &mut B)>() {
+        a.0 += b.0;
+        b.0 += a.0;
+    }
+
+    for (a, b) in world.query::<(&A, &B)>() {
+        println!("A: {}, B: {}", a.0, b.0);
     }
 }

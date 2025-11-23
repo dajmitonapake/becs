@@ -1,6 +1,10 @@
 use std::any::TypeId;
 
-use crate::{archetype::Archetype, blob_data::TypeInfo, world::World};
+use crate::{
+    archetype::Archetype,
+    blob_data::TypeInfo,
+    world::{Component, World},
+};
 
 pub trait Bundle {
     fn register(world: &mut World);
@@ -8,7 +12,7 @@ pub trait Bundle {
     fn put(self, row: usize, archetype: &mut Archetype);
 }
 
-impl<T0: 'static> Bundle for (T0,) {
+impl<T0: Component> Bundle for T0 {
     fn register(world: &mut World) {
         world.register_component::<T0>();
     }
@@ -27,7 +31,7 @@ impl<T0: 'static> Bundle for (T0,) {
             ),
         );
 
-        archetype.insert(TypeId::of::<T0>(), (&mut self.0 as *mut T0).cast::<u8>());
+        archetype.insert(TypeId::of::<T0>(), (&mut self as *mut T0).cast::<u8>());
         archetype.insert_row(row);
         std::mem::forget(self);
     }
@@ -35,7 +39,7 @@ impl<T0: 'static> Bundle for (T0,) {
 
 macro_rules! impl_bundle_for_tuple {
     ($($T:tt, $N:tt),+) => {
-        impl<$($T: 'static),*> Bundle for ($($T),*) {
+        impl<$($T: Component),*> Bundle for ($($T),*) {
             fn register(world: &mut World) {
                 $(
                     world.register_component::<$T>();

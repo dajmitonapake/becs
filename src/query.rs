@@ -16,7 +16,7 @@ pub trait Fetch {
     fn release<'a>(column: &'a BlobData);
 }
 
-impl<T: 'static> Fetch for &T {
+impl<T: Component> Fetch for &T {
     type Item<'a> = &'a T;
     type Chunk<'a> = std::slice::Iter<'a, T>;
 
@@ -43,7 +43,7 @@ impl<T: 'static> Fetch for &T {
         column.release()
     }
 }
-impl<T: 'static> Fetch for &mut T {
+impl<T: Component> Fetch for &mut T {
     type Item<'a> = &'a mut T;
     type Chunk<'a> = std::slice::IterMut<'a, T>;
 
@@ -163,6 +163,53 @@ pub trait QueryState<F: Filter = ()> {
 
 pub struct MultiZip<T>(pub T);
 
+impl<F: Filter, A: Fetch> QueryState<F> for A {
+    type Iter<'a> = A::Chunk<'a>;
+
+    fn prepare<'a>(
+        archetypes: &'a Vec<Archetype>,
+        bitmap: &HashMap<TypeId, u64>,
+        cache: &'a mut QueryCache,
+    ) -> QueryIter<'a, Self, F> {
+        let required_bitmask = A::bit(bitmap);
+
+        let (required_bitmask, exclusion_bitmask) = F::combine(required_bitmask, 0, bitmap);
+
+        let cache = cache.get_or_insert_with(required_bitmask, exclusion_bitmask, CacheEntry::new);
+        let archetypes_length = archetypes.len();
+
+        if cache.high_water_mark < archetypes_length {
+            for i in cache.high_water_mark..archetypes_length {
+                let archetype = &archetypes[i];
+
+                let required_passes = (archetype.bitmask & required_bitmask) == required_bitmask;
+                let exclusion_passes = (archetype.bitmask & exclusion_bitmask) == 0;
+
+                if required_passes && exclusion_passes {
+                    cache.archetypes.push(i);
+                }
+            }
+
+            cache.high_water_mark = archetypes_length;
+        }
+
+        QueryIter {
+            archetypes: archetypes.as_slice(),
+            indices: cache.archetypes.iter(),
+            current_iter: None,
+            current_archetype: None,
+        }
+    }
+
+    #[inline]
+    fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>> {
+        Some(A::take_chunk(archetype.columns.get(&A::type_id())?))
+    }
+
+    fn release<'a>(archetype: &'a Archetype) {
+        A::release(archetype.columns.get(&A::type_id()).unwrap());
+    }
+}
 macro_rules! impl_query_for_tuple {
     ($($name:ident),*) => {
 
