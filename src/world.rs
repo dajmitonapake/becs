@@ -11,6 +11,7 @@ pub struct World {
     bitmap: HashMap<TypeId, u64>,
     archetype_map: HashMap<u64, usize>,
     archetypes: Vec<Archetype>,
+    cache: QueryCache,
     entities: Entities,
     next_bitmask: u8,
 }
@@ -22,6 +23,7 @@ impl World {
             bitmap: HashMap::new(),
             archetype_map: HashMap::new(),
             archetypes: Vec::new(),
+            cache: QueryCache::new(),
             entities: Entities::new(),
             next_bitmask: 0,
         }
@@ -377,14 +379,8 @@ impl World {
 
     #[inline]
     #[must_use]
-    pub fn query<'a, Q: QueryState>(&'a self) -> QueryIter<'a, Q> {
-        Q::prepare(self)
-    }
-
-    #[inline]
-    #[must_use]
-    pub(crate) fn archetypes(&self) -> &Vec<Archetype> {
-        &self.archetypes
+    pub fn query<'a, Q: QueryState>(&'a mut self) -> QueryIter<'a, Q> {
+        Q::prepare(&self.archetypes, &self.bitmap, &mut self.cache)
     }
 
     #[inline]
@@ -416,6 +412,50 @@ impl World {
             .metas
             .get(entity.index)
             .map_or(false, |meta| meta.generation == entity.generation)
+    }
+}
+
+pub struct CacheEntry {
+    pub high_water_mark: usize,
+    pub archetypes: Vec<usize>,
+}
+
+impl CacheEntry {
+    pub fn new() -> Self {
+        Self {
+            high_water_mark: 0,
+            archetypes: Vec::new(),
+        }
+    }
+}
+
+pub struct QueryCache {
+    cache: HashMap<u64, CacheEntry>,
+}
+
+impl QueryCache {
+    pub fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, bitmask: u64, high_water_mark: usize, archetypes: Vec<usize>) {
+        self.cache.insert(
+            bitmask,
+            CacheEntry {
+                high_water_mark,
+                archetypes,
+            },
+        );
+    }
+
+    pub fn get_or_insert_with(
+        &mut self,
+        bitmask: u64,
+        f: impl FnOnce() -> CacheEntry,
+    ) -> &mut CacheEntry {
+        self.cache.entry(bitmask).or_insert_with(f)
     }
 }
 

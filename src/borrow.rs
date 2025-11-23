@@ -1,3 +1,5 @@
+// Borrowed from https://github.com/Ralith/hecs
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// A bit mask used to signal the `AtomicBorrow` has an active mutable borrow.

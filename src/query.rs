@@ -1,12 +1,16 @@
-use std::any::TypeId;
+use std::{any::TypeId, collections::HashMap};
 
-use crate::{archetype::Archetype, blob_data::BlobData, world::World};
+use crate::{
+    archetype::Archetype,
+    blob_data::BlobData,
+    world::{CacheEntry, QueryCache},
+};
 
 pub trait Fetch {
     type Item<'a>;
     type Chunk<'a>: Iterator<Item = Self::Item<'a>>;
 
-    fn bit(world: &World) -> u64;
+    fn bit(bitmap: &HashMap<TypeId, u64>) -> u64;
     fn type_id() -> TypeId;
     fn take_chunk<'a>(column: &'a BlobData) -> Self::Chunk<'a>;
     fn release<'a>(column: &'a BlobData);
@@ -17,8 +21,8 @@ impl<T: 'static> Fetch for &T {
     type Chunk<'a> = std::slice::Iter<'a, T>;
 
     #[inline]
-    fn bit(world: &World) -> u64 {
-        world.bit_of::<T>().unwrap()
+    fn bit(bitmap: &HashMap<TypeId, u64>) -> u64 {
+        bitmap[&TypeId::of::<T>()]
     }
 
     #[inline]
@@ -44,8 +48,8 @@ impl<T: 'static> Fetch for &mut T {
     type Chunk<'a> = std::slice::IterMut<'a, T>;
 
     #[inline]
-    fn bit(world: &World) -> u64 {
-        world.bit_of::<T>().unwrap()
+    fn bit(bitmap: &HashMap<TypeId, u64>) -> u64 {
+        bitmap[&TypeId::of::<T>()]
     }
 
     #[inline]
@@ -68,20 +72,10 @@ impl<T: 'static> Fetch for &mut T {
     }
 }
 
-pub trait QueryState {
-    type Iter<'a>: Iterator;
-
-    fn prepare<'a>(world: &'a World) -> QueryIter<'a, Self>
-    where
-        Self: Sized;
-
-    fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>>;
-    fn release<'a>(archetype: &'a Archetype);
-}
-
 pub struct QueryIter<'a, Q: QueryState> {
-    archetype_iter: std::slice::Iter<'a, Archetype>,
-    bitmask: u64,
+    archetypes: &'a [Archetype],
+    indices: Vec<usize>,
+    cursor: usize,
     current_iter: Option<Q::Iter<'a>>,
     current_archetype: Option<&'a Archetype>,
 }
@@ -104,12 +98,14 @@ impl<'a, Q: QueryState> Iterator for QueryIter<'a, Q> {
                 self.current_iter = None;
             }
 
-            let next_arch = loop {
-                let arch = self.archetype_iter.next()?;
-                if arch.bitmask & self.bitmask == self.bitmask {
-                    break arch;
-                }
-            };
+            if self.cursor >= self.indices.len() {
+                return None;
+            }
+
+            let arch_index = self.indices[self.cursor];
+            self.cursor += 1;
+
+            let next_arch = &self.archetypes[arch_index];
 
             self.current_iter = Q::create_iter(next_arch);
             self.current_archetype = Some(next_arch);
@@ -125,6 +121,21 @@ impl<'a, Q: QueryState> Drop for QueryIter<'a, Q> {
     }
 }
 
+pub trait QueryState {
+    type Iter<'a>: Iterator;
+
+    fn prepare<'a>(
+        archetypes: &'a Vec<Archetype>,
+        bitmap: &HashMap<TypeId, u64>,
+        cache: &mut QueryCache,
+    ) -> QueryIter<'a, Self>
+    where
+        Self: Sized;
+
+    fn create_iter<'a>(archetype: &'a Archetype) -> Option<Self::Iter<'a>>;
+    fn release<'a>(archetype: &'a Archetype);
+}
+
 pub struct MultiZip<T>(pub T);
 
 macro_rules! impl_query_for_tuple {
@@ -133,24 +144,33 @@ macro_rules! impl_query_for_tuple {
         impl<$($name: Fetch),*> QueryState for ($($name,)*) {
             type Iter<'a> = MultiZip<($($name::Chunk<'a>,)*)>;
 
-            fn prepare<'a>(world: &'a World) -> QueryIter<'a, Self> {
+            fn prepare<'a>(archetypes: &'a Vec<Archetype>, bitmap: &HashMap<TypeId, u64>, cache: &mut QueryCache) -> QueryIter<'a, Self> {
                 let mut bitmask = 0;
                 $(
-                    bitmask |= $name::bit(world);
+                    bitmask |= $name::bit(bitmap);
                 )*
 
-                let mut archetype_iter = world
-                    .archetypes()
-                    .iter();
+                let cache = cache.get_or_insert_with(bitmask, CacheEntry::new);
+                let archetypes_length = archetypes.len();
 
-                let current_archetype = archetype_iter.next();
-                let current_iter = current_archetype.and_then(|arch| Self::create_iter(arch));
+                if cache.high_water_mark < archetypes_length {
+                    for i in cache.high_water_mark..archetypes_length {
+                        let archetype = &archetypes[i];
+
+                        if archetype.bitmask & bitmask == bitmask {
+                            cache.archetypes.push(i);
+                        }
+                    }
+
+                    cache.high_water_mark = archetypes_length;
+                }
 
                 QueryIter {
-                    archetype_iter,
-                    bitmask,
-                    current_iter,
-                    current_archetype,
+                    archetypes: archetypes.as_slice(),
+                    indices: cache.archetypes.clone(),
+                    cursor: 0,
+                    current_iter: None,
+                    current_archetype: None,
                 }
             }
 
