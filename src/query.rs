@@ -179,9 +179,7 @@ impl<Q: QueryItem, F: Filter> QueryData<Q, F> {
         let required = required_q | required_f;
         let excluded = excluded_q | excluded_f;
 
-        self.matching.clear();
-
-        for (index, archetype) in archetypes.iter().enumerate() {
+        for (index, archetype) in archetypes.iter().enumerate().skip(self.high_water_mark) {
             let mask = archetype.bitmask();
             if (mask & required) == required && (mask & excluded) == 0 {
                 self.matching.push(index);
