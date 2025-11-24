@@ -21,7 +21,8 @@ fn bench_query_for_each(pairs: usize, c: &mut Criterion) {
             || make_world(pairs),
             |mut world| {
                 let mut matching = 0usize;
-                world.query::<(&mut A, &mut B)>().for_each(|(a, b)| {
+                let mut q = world.query::<(&mut A, &mut B)>();
+                q.iter(&world).for_each(|(a, b)| {
                     a.0 += 1;
                     b.0 += 1;
                     matching += 1;
@@ -39,31 +40,12 @@ fn bench_query_traditional(pairs: usize, c: &mut Criterion) {
             || make_world(pairs),
             |mut world| {
                 let mut matching = 0usize;
-                for (a, b) in world.query::<(&mut A, &mut B)>() {
+                let mut q = world.query::<(&mut A, &mut B)>();
+                for (a, b) in q.iter(&world) {
                     a.0 += 1;
                     b.0 += 1;
                     matching += 1;
                 }
-                std::hint::black_box(matching)
-            },
-            BatchSize::LargeInput,
-        )
-    });
-}
-
-fn bench_query_chunked(pairs: usize, c: &mut Criterion) {
-    c.bench_function(&format!("query_chunked_{}pairs", pairs), |b| {
-        b.iter_batched(
-            || make_world(pairs),
-            |mut world| {
-                let mut matching = 0usize;
-                world.query_chunks::<(&mut A, &mut B)>(|(a_chunk, b_chunk)| {
-                    for (a, b) in a_chunk.iter_mut().zip(b_chunk) {
-                        a.0 += 1;
-                        b.0 += 1;
-                        matching += 1;
-                    }
-                });
                 std::hint::black_box(matching)
             },
             BatchSize::LargeInput,
@@ -183,7 +165,6 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     bench_query_for_each(large_pairs, c);
     bench_query_traditional(large_pairs, c);
-    bench_query_chunked(large_pairs, c);
 
     bench_spawn_methods(spawn_cnt, c);
     bench_insert_component(micro_iters, c);

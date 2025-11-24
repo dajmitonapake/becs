@@ -4,14 +4,13 @@ use crate::{
     archetype::Archetype,
     blob_data::TypeInfo,
     bundle::Bundle,
-    query::{Filter, QueryIter, QueryState},
+    query::{Filter, QueryData, QueryItem},
 };
 
 pub struct World {
     bitmap: HashMap<TypeId, u64>,
     archetype_map: HashMap<u64, usize>,
     archetypes: Vec<Archetype>,
-    cache: QueryCache,
     entities: Entities,
     next_bitmask: u8,
 }
@@ -23,7 +22,6 @@ impl World {
             bitmap: HashMap::new(),
             archetype_map: HashMap::new(),
             archetypes: Vec::new(),
-            cache: QueryCache::new(),
             entities: Entities::new(),
             next_bitmask: 0,
         }
@@ -362,31 +360,18 @@ impl World {
         self.entities.free.push(entity.index);
     }
 
-    /// Efficiently queries components without any filter. Stores [`QueryCache`] internally for faster future queries.
+    /// Creates a query data which can be later used to iterate over entities. Store the returned query data so the cache might be used to optimize future queries.
     #[inline]
     #[must_use]
-    pub fn query<'a, Q: QueryState<()>>(&'a mut self) -> QueryIter<'a, Q, ()> {
-        self.query_filtered::<Q, ()>()
+    pub fn query<Q: QueryItem>(&mut self) -> QueryData<Q> {
+        QueryData::new(self)
     }
 
-    /// Returns an iterator over requested components with given filters. If you want don't want to filter the results, use [`World::query`].
+    /// Creates a filtered query data which can be later used to iterate over entities. Store the returned query data so the cache might be used to optimize future queries.
     #[inline]
     #[must_use]
-    pub fn query_filtered<'a, Q: QueryState<F>, F: Filter>(&'a mut self) -> QueryIter<'a, Q, F> {
-        Q::prepare(&self.archetypes, &self.bitmap, &mut self.cache)
-    }
-
-    #[inline]
-    pub fn query_chunks<'a, Q: QueryState<()>>(&'a mut self, f: impl FnMut(Q::Slices<'a>)) {
-        self.query_chunks_filtered::<Q, ()>(f);
-    }
-
-    #[inline]
-    pub fn query_chunks_filtered<'a, Q: QueryState<F>, F: Filter>(
-        &'a mut self,
-        f: impl FnMut(Q::Slices<'a>),
-    ) {
-        Q::for_each_chunk(&self.archetypes, &self.bitmap, &mut self.cache, f);
+    pub fn query_filtered<Q: QueryItem, F: Filter>(&mut self) -> QueryData<Q, F> {
+        QueryData::new(self)
     }
 
     #[inline]
@@ -409,6 +394,12 @@ impl World {
 
     #[inline]
     #[must_use]
+    pub(crate) fn archetypes(&self) -> &Vec<Archetype> {
+        &self.archetypes
+    }
+
+    #[inline]
+    #[must_use]
     pub(crate) fn archetype_of(&self, entity: Entity) -> Option<&Archetype> {
         let id = self.entities.metas.get(entity.index)?.location.archetype;
         self.archetypes.get(id)
@@ -418,60 +409,6 @@ impl World {
     #[must_use]
     pub(crate) fn bit_of<T: 'static>(&self) -> Option<u64> {
         self.bitmap.get(&TypeId::of::<T>()).copied()
-    }
-}
-
-pub struct CacheEntry {
-    pub high_water_mark: usize,
-    pub archetypes: Vec<usize>,
-}
-
-impl CacheEntry {
-    pub fn new() -> Self {
-        Self {
-            high_water_mark: 0,
-            archetypes: Vec::new(),
-        }
-    }
-}
-
-pub struct QueryCache {
-    // (required bitmask, exclusion bitmask)
-    cache: HashMap<(u64, u64), CacheEntry>,
-}
-
-impl QueryCache {
-    pub fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-
-    pub fn insert(
-        &mut self,
-        required_bitmask: u64,
-        exclusion_bitmask: u64,
-        high_water_mark: usize,
-        archetypes: Vec<usize>,
-    ) {
-        self.cache.insert(
-            (required_bitmask, exclusion_bitmask),
-            CacheEntry {
-                high_water_mark,
-                archetypes,
-            },
-        );
-    }
-
-    pub fn get_or_insert_with(
-        &mut self,
-        required_bitmask: u64,
-        exclusion_bitmask: u64,
-        f: impl FnOnce() -> CacheEntry,
-    ) -> &mut CacheEntry {
-        self.cache
-            .entry((required_bitmask, exclusion_bitmask))
-            .or_insert_with(f)
     }
 }
 

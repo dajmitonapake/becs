@@ -175,32 +175,28 @@ impl BlobData {
         unsafe { self.ptr.unwrap().as_ptr().add(index * self.info.size) }
     }
 
-    /// Caller must ensure that the length is not zero
+    /// Caller must ensure that the allocation exists and the generic type has exactly the same layout as the stored one
     #[inline]
     #[must_use]
-    pub(crate) unsafe fn as_slice<T>(&self) -> &[T] {
+    pub unsafe fn as_ptr<T>(&self) -> *const T {
         debug_assert!(
             self.info.validate::<T>(),
             "Attempted to access blob data with invalid type"
         );
-        debug_assert!(self.len > 0, "Length must be greater than zero");
 
-        let ptr = self.ptr.unwrap().as_ptr() as *const T;
-        unsafe { std::slice::from_raw_parts(ptr, self.len) }
+        self.ptr.unwrap().as_ptr().cast::<T>()
     }
 
-    /// Caller must ensure that the length is not zero
+    /// Caller must ensure that the allocation exists and the generic type has exactly the same layout as the stored one
     #[inline]
     #[must_use]
-    pub(crate) unsafe fn as_slice_mut<T>(&self) -> &mut [T] {
+    pub unsafe fn as_mut_ptr<T>(&self) -> *mut T {
         debug_assert!(
             self.info.validate::<T>(),
             "Attempted to access blob data with invalid type"
         );
-        debug_assert!(self.len > 0, "Length must be greater than zero");
 
-        let ptr = self.ptr.unwrap().as_ptr() as *mut T;
-        unsafe { std::slice::from_raw_parts_mut(ptr, self.len) }
+        self.ptr.unwrap().as_ptr().cast::<T>()
     }
 
     #[inline]
