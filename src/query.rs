@@ -47,9 +47,9 @@ impl<T: Component> QueryItem for &T {
     #[inline(always)]
     unsafe fn fetch<'a>(state: &mut Self::State) -> Self::Item<'a> {
         unsafe {
-            let current = &**state;
+            let current = *state;
             *state = state.add(1);
-            current
+            &*current
         }
     }
 }
@@ -83,9 +83,9 @@ impl<T: Component> QueryItem for &mut T {
     #[inline(always)]
     unsafe fn fetch<'a>(state: &mut Self::State) -> Self::Item<'a> {
         unsafe {
-            let current = &mut **state;
+            let current = *state;
             *state = state.add(1);
-            current
+            &mut *current
         }
     }
 }
